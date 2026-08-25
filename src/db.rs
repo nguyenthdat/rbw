@@ -96,7 +96,7 @@ impl<'de> serde::Deserialize<'de> for Uri {
                             return Err(serde::de::Error::unknown_field(
                                 key,
                                 &["uri", "match_type"],
-                            ))
+                            ));
                         }
                     }
                 }

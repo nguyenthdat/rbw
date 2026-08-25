@@ -1,6 +1,6 @@
 use crate::prelude::*;
 
-use sha1::Digest as _;
+use sha2::Digest as _;
 
 pub struct Identity {
     pub email: String,

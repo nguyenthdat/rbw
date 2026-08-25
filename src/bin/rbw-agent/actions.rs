@@ -64,7 +64,7 @@ pub async fn register(
                 }
                 Err(e) => {
                     return Err(e)
-                        .context("failed to log in to bitwarden instance")
+                        .context("failed to log in to bitwarden instance");
                 }
             }
         }
@@ -213,7 +213,7 @@ pub async fn login(
                 }
                 Err(e) => {
                     return Err(e)
-                        .context("failed to log in to bitwarden instance")
+                        .context("failed to log in to bitwarden instance");
                 }
             }
         }
@@ -284,7 +284,7 @@ async fn two_factor(
                     memory,
                     parallelism,
                     protected_key,
-                ))
+                ));
             }
             Err(rbw::error::Error::IncorrectPassword { message }) => {
                 if i == 3 {
@@ -308,7 +308,7 @@ async fn two_factor(
             }
             Err(e) => {
                 return Err(e)
-                    .context("failed to log in to bitwarden instance")
+                    .context("failed to log in to bitwarden instance");
             }
         }
     }

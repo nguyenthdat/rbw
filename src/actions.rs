@@ -105,28 +105,28 @@ pub fn unlock<S: std::hash::BuildHasher>(
         Err(Error::InvalidMac) => {
             return Err(Error::IncorrectPassword {
                 message: "Password is incorrect. Try again.".to_string(),
-            })
+            });
         }
         Err(e) => return Err(e),
     };
 
     let protected_private_key =
         crate::cipherstring::CipherString::new(protected_private_key)?;
-    let private_key =
-        match protected_private_key.decrypt_locked_symmetric(&key) {
-            Ok(private_key) => crate::locked::PrivateKey::new(private_key),
-            Err(e) => return Err(e),
-        };
+    let private_key = {
+        let private_key =
+            protected_private_key.decrypt_locked_symmetric(&key)?;
+        crate::locked::PrivateKey::new(private_key)
+    };
 
     let mut org_keys = std::collections::HashMap::new();
     for (org_id, protected_org_key) in protected_org_keys {
         let protected_org_key =
             crate::cipherstring::CipherString::new(protected_org_key)?;
-        let org_key =
-            match protected_org_key.decrypt_locked_asymmetric(&private_key) {
-                Ok(org_key) => crate::locked::Keys::new(org_key),
-                Err(e) => return Err(e),
-            };
+        let org_key = {
+            let org_key =
+                protected_org_key.decrypt_locked_asymmetric(&private_key)?;
+            crate::locked::Keys::new(org_key)
+        };
         org_keys.insert(org_id.clone(), org_key);
     }
 
@@ -357,8 +357,8 @@ fn api_client() -> Result<(crate::api::Client, crate::config::Config)> {
     Ok((client, config))
 }
 
-async fn api_client_async(
-) -> Result<(crate::api::Client, crate::config::Config)> {
+async fn api_client_async()
+-> Result<(crate::api::Client, crate::config::Config)> {
     let config = crate::config::Config::load_async().await?;
     let client = crate::api::Client::new(
         &config.base_url(),

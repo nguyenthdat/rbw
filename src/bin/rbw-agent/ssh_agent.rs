@@ -1,4 +1,6 @@
-use signature::{RandomizedSigner as _, SignatureEncoding as _, Signer as _};
+use rsa::signature::{
+    RandomizedSigner as _, SignatureEncoding as _, Signer as _,
+};
 
 const SSH_AGENT_RSA_SHA2_256: u32 = 2;
 const SSH_AGENT_RSA_SHA2_512: u32 = 4;
@@ -42,7 +44,7 @@ impl ssh_agent_lib::agent::Session for SshAgent {
             .map(|p| {
                 p.parse::<ssh_agent_lib::ssh_key::PublicKey>()
                     .map(|pk| ssh_agent_lib::proto::Identity {
-                        pubkey: pk.key_data().clone(),
+                        credential: pk.key_data().clone().into(),
                         comment: String::new(),
                     })
                     .map_err(ssh_agent_lib::error::AgentError::other)
@@ -57,8 +59,10 @@ impl ssh_agent_lib::agent::Session for SshAgent {
         ssh_agent_lib::ssh_key::Signature,
         ssh_agent_lib::error::AgentError,
     > {
-        let pubkey =
-            ssh_agent_lib::ssh_key::PublicKey::new(request.pubkey, "");
+        let pubkey = ssh_agent_lib::ssh_key::PublicKey::new(
+            request.credential.key_data().clone(),
+            "",
+        );
 
         let private_key =
             crate::actions::find_ssh_private_key(self.state.clone(), pubkey)
@@ -85,20 +89,18 @@ impl ssh_agent_lib::agent::Session for SshAgent {
                     & SSH_AGENT_RSA_SHA2_512
                     != 0
                 {
-                    let signing_key =
-                        rsa::pkcs1v15::SigningKey::<sha2::Sha512>::new(
-                            rsa_key,
-                        );
+                    let signing_key = rsa::pkcs1v15::SigningKey::<
+                        rsa::sha2::Sha512,
+                    >::new(rsa_key);
                     let signature = signing_key
                         .try_sign_with_rng(&mut rng, &request.data)
                         .map_err(ssh_agent_lib::error::AgentError::other)?;
 
                     ("rsa-sha2-512", signature.to_bytes())
                 } else if request.flags & SSH_AGENT_RSA_SHA2_256 != 0 {
-                    let signing_key =
-                        rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new(
-                            rsa_key,
-                        );
+                    let signing_key = rsa::pkcs1v15::SigningKey::<
+                        rsa::sha2::Sha256,
+                    >::new(rsa_key);
                     let signature = signing_key
                         .try_sign_with_rng(&mut rng, &request.data)
                         .map_err(ssh_agent_lib::error::AgentError::other)?;

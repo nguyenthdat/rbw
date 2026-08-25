@@ -6,8 +6,7 @@ use anyhow::Context as _;
 // code lasts for before a new one must be generated
 const TOTP_DEFAULT_STEP: u64 = 30;
 
-const MISSING_CONFIG_HELP: &str =
-    "Before using rbw, you must configure the email address you would like to \
+const MISSING_CONFIG_HELP: &str = "Before using rbw, you must configure the email address you would like to \
     use to log in to the server by running:\n\n    \
         rbw config set email <email>\n\n\
     Additionally, if you are using a self-hosted installation, you should \
@@ -1507,8 +1506,7 @@ pub fn search(
         .filter(|entry| {
             entry
                 .as_ref()
-                .map(|entry| entry.search_match(term, folder))
-                .unwrap_or(true)
+                .map_or(true, |entry| entry.search_match(term, folder))
         })
         .map(|entry| entry.map(std::convert::Into::into))
         .collect::<Result<_, anyhow::Error>>()?;
