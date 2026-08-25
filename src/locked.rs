@@ -102,6 +102,10 @@ impl Keys {
         Self { keys }
     }
 
+    pub fn bytes(&self) -> &[u8] {
+        self.keys.data()
+    }
+
     pub fn enc_key(&self) -> &[u8] {
         &self.keys.data()[0..32]
     }

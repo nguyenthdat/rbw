@@ -361,6 +361,10 @@ async fn login_success(
 
     match res {
         Ok((keys, org_keys)) => {
+            if rbw::config::Config::load_async().await?.touch_id {
+                rbw::touch_id::store(&keys)
+                    .context("failed to store vault key with Touch ID")?;
+            }
             let mut state = state.lock().await;
             state.priv_key = Some(keys);
             state.org_keys = Some(org_keys);
@@ -375,83 +379,105 @@ async fn unlock_state(
     state: std::sync::Arc<tokio::sync::Mutex<crate::state::State>>,
     environment: &rbw::protocol::Environment,
 ) -> anyhow::Result<()> {
-    if state.lock().await.needs_unlock() {
-        let db = load_db().await?;
+    if !state.lock().await.needs_unlock() {
+        return Ok(());
+    }
 
-        let Some(kdf) = db.kdf else {
-            return Err(anyhow::anyhow!("failed to find kdf type in db"));
-        };
+    let db = load_db().await?;
 
-        let Some(iterations) = db.iterations else {
-            return Err(anyhow::anyhow!(
-                "failed to find number of iterations in db"
-            ));
-        };
+    let Some(kdf) = db.kdf else {
+        return Err(anyhow::anyhow!("failed to find kdf type in db"));
+    };
+    let Some(iterations) = db.iterations else {
+        return Err(anyhow::anyhow!(
+            "failed to find number of iterations in db"
+        ));
+    };
+    let memory = db.memory;
+    let parallelism = db.parallelism;
+    let Some(protected_key) = db.protected_key else {
+        return Err(anyhow::anyhow!("failed to find protected key in db"));
+    };
+    let Some(protected_private_key) = db.protected_private_key else {
+        return Err(anyhow::anyhow!(
+            "failed to find protected private key in db"
+        ));
+    };
 
-        let memory = db.memory;
-        let parallelism = db.parallelism;
-
-        let Some(protected_key) = db.protected_key else {
-            return Err(anyhow::anyhow!(
-                "failed to find protected key in db"
-            ));
-        };
-        let Some(protected_private_key) = db.protected_private_key else {
-            return Err(anyhow::anyhow!(
-                "failed to find protected private key in db"
-            ));
-        };
-
-        let email = config_email().await?;
-
-        let mut err_msg = None;
-        for i in 1_u8..=3 {
-            let err = if i > 1 {
-                // this unwrap is safe because we only ever continue the loop
-                // if we have set err_msg
-                Some(format!("{} (attempt {}/3)", err_msg.unwrap(), i))
-            } else {
-                None
-            };
-            let password = rbw::pinentry::getpin(
-                &config_pinentry().await?,
-                "Master Password",
-                &format!(
-                    "Unlock the local database for '{}'",
-                    rbw::dirs::profile()
-                ),
-                err.as_deref(),
-                environment,
-                true,
-            )
-            .await
-            .context("failed to read password from pinentry")?;
-            match rbw::actions::unlock(
-                &email,
-                &password,
-                kdf,
-                iterations,
-                memory,
-                parallelism,
-                &protected_key,
+    let config = rbw::config::Config::load_async().await?;
+    if config.touch_id {
+        if let Some(key) = rbw::touch_id::load()
+            .context("failed to read vault key with Touch ID")?
+        {
+            match rbw::actions::unlock_with_keys(
+                key,
                 &protected_private_key,
                 &db.protected_org_keys,
             ) {
                 Ok((keys, org_keys)) => {
                     unlock_success(state, keys, org_keys).await?;
-                    break;
+                    return Ok(());
                 }
-                Err(rbw::error::Error::IncorrectPassword { message }) => {
-                    if i == 3 {
-                        return Err(rbw::error::Error::IncorrectPassword {
-                            message,
-                        })
-                        .context("failed to unlock database");
-                    }
-                    err_msg = Some(message);
+                Err(_) => {
+                    rbw::touch_id::delete().context(
+                        "failed to remove stale Touch ID vault key",
+                    )?;
                 }
-                Err(e) => return Err(e).context("failed to unlock database"),
             }
+        }
+    }
+
+    let email = config_email().await?;
+
+    let mut err_msg = None;
+    for i in 1_u8..=3 {
+        let err = if i > 1 {
+            Some(format!("{} (attempt {}/3)", err_msg.unwrap(), i))
+        } else {
+            None
+        };
+        let password = rbw::pinentry::getpin(
+            &config.pinentry,
+            "Master Password",
+            &format!(
+                "Unlock the local database for '{}'",
+                rbw::dirs::profile()
+            ),
+            err.as_deref(),
+            environment,
+            true,
+        )
+        .await
+        .context("failed to read password from pinentry")?;
+        match rbw::actions::unlock(
+            &email,
+            &password,
+            kdf,
+            iterations,
+            memory,
+            parallelism,
+            &protected_key,
+            &protected_private_key,
+            &db.protected_org_keys,
+        ) {
+            Ok((keys, org_keys)) => {
+                if config.touch_id {
+                    rbw::touch_id::store(&keys)
+                        .context("failed to store vault key with Touch ID")?;
+                }
+                unlock_success(state, keys, org_keys).await?;
+                break;
+            }
+            Err(rbw::error::Error::IncorrectPassword { message }) => {
+                if i == 3 {
+                    return Err(rbw::error::Error::IncorrectPassword {
+                        message,
+                    })
+                    .context("failed to unlock database");
+                }
+                err_msg = Some(message);
+            }
+            Err(e) => return Err(e).context("failed to unlock database"),
         }
     }
 

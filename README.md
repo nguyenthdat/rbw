@@ -96,6 +96,12 @@ configuration options:
 * `pinentry`: The
   [pinentry](https://www.gnupg.org/related_software/pinentry/index.html)
   executable to use. Defaults to `pinentry`.
+* `touch_id`: On macOS, set to `true` to store the derived vault key in the
+  Keychain protected by the currently enrolled Touch ID set. `rbw unlock`
+  will request Touch ID before reading it, without storing the master password.
+  Defaults to `false`; setting this to `false` removes the stored key. The
+  binary must be running in a graphical user session with Touch ID available.
+  This option is unsupported on other platforms.
 
 ### Profiles
 

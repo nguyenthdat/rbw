@@ -2151,6 +2151,8 @@ dependencies = [
  "rmpv",
  "rsa",
  "rustix",
+ "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "serde_path_to_error",

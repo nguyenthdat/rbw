@@ -3,6 +3,9 @@
 ## [1.15.0] - 2025-12-31
 
 ## Added
+* On macOS, `rbw config set touch_id true` stores the derived vault key in the
+  Keychain protected by the current Touch ID enrollment and uses Touch ID for
+  subsequent local database unlocks without storing the master password.
 
 * Added support for `rbw get --field=private_key` for ssh key entries (#291).
 * Added support for `rbw list --field=type` (Antoine Carnec, #283).

@@ -16,7 +16,8 @@ pub struct Config {
     pub lock_timeout: u64,
     #[serde(default = "default_sync_interval")]
     pub sync_interval: u64,
-    #[serde(default = "default_pinentry")]
+    #[serde(default)]
+    pub touch_id: bool,
     pub pinentry: String,
     pub client_cert_path: Option<std::path::PathBuf>,
     // backcompat, no longer generated in new configs
@@ -35,6 +36,7 @@ impl Default for Config {
             notifications_url: None,
             lock_timeout: default_lock_timeout(),
             sync_interval: default_sync_interval(),
+            touch_id: false,
             pinentry: default_pinentry(),
             client_cert_path: None,
             device_id: None,
