@@ -216,13 +216,14 @@ jobs:
       - name: Build Debian package
         if: matrix.deb
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
           cargo binstall --no-confirm cargo-deb
-          cargo deb --no-build --target "${TARGET}"
-          cp "target/${TARGET}/debian/rbw_${VERSION}_amd64.deb" dist/
+          DEB_PATH="$(cargo deb --no-build --target "${TARGET}" | tail -n 1)"
+          cp "${DEB_PATH}" "dist/rbw_${VERSION}_amd64.deb"
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
