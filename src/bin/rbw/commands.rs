@@ -1638,10 +1638,8 @@ pub fn account_add(opts: AccountAddOpts<'_>) -> anyhow::Result<()> {
         true
     } else if opts.no_login {
         false
-    } else if interactive {
-        crate::prompt::confirm("Log in now?", true)?
     } else {
-        false
+        interactive && crate::prompt::confirm("Log in now?", true)?
     };
 
     let account_cfg = rbw::config::AccountConfig {
@@ -4179,6 +4177,8 @@ fn run_agent() -> anyhow::Result<()> {
         .as_deref()
         .unwrap_or_else(|| std::ffi::OsStr::from_bytes(b"rbw-agent"));
     let status = std::process::Command::new(agent_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
         .status()
         .context("failed to run rbw-agent")?;
     if !status.success()
@@ -5082,10 +5082,2236 @@ fn generate_totp(secret: &str) -> anyhow::Result<String> {
 }
 
 fn display_field(name: &str, field: Option<&str>, clipboard: bool) -> bool {
-    field.map_or_else(
-        || false,
-        |field| val_display_or_store(clipboard, &format!("{name}: {field}")),
-    )
+    field.is_some_and(|field| {
+        val_display_or_store(clipboard, &format!("{name}: {field}"))
+    })
+}
+
+#[cfg(feature = "mcp")]
+pub mod mcp_ops {
+    use super::*;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum EntryKind {
+        Login,
+        Note,
+        Card,
+        Identity,
+        SshKey,
+    }
+
+    impl EntryKind {
+        pub fn from_entry_data(data: &rbw::db::EntryData) -> Self {
+            match data {
+                rbw::db::EntryData::Login { .. } => Self::Login,
+                rbw::db::EntryData::SecureNote => Self::Note,
+                rbw::db::EntryData::Card { .. } => Self::Card,
+                rbw::db::EntryData::Identity { .. } => Self::Identity,
+                rbw::db::EntryData::SshKey { .. } => Self::SshKey,
+            }
+        }
+
+        pub fn as_str(self) -> &'static str {
+            match self {
+                Self::Login => "login",
+                Self::Note => "note",
+                Self::Card => "card",
+                Self::Identity => "identity",
+                Self::SshKey => "ssh_key",
+            }
+        }
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct FolderInfo {
+        pub id: String,
+        pub name: String,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct AccountInfo {
+        pub name: String,
+        pub email: Option<String>,
+        pub server: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub base_url: Option<String>,
+        pub active: bool,
+        pub status: String,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct StatusReport {
+        pub agent_running: bool,
+        pub active_account: Option<String>,
+        pub selected_account: Option<String>,
+        pub accounts: Vec<AccountInfo>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub folders: Option<Vec<FolderInfo>>,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct EntrySummary {
+        pub id: String,
+        #[serde(rename = "type")]
+        pub entry_type: String,
+        pub name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub username: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub folder: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub uris: Vec<String>,
+        pub has_totp: bool,
+        pub attachment_count: usize,
+        pub reprompt: bool,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct SearchReport {
+        pub total: usize,
+        pub returned: usize,
+        pub offset: usize,
+        pub limit: usize,
+        pub items: Vec<EntrySummary>,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct AttachmentSummary {
+        pub id: String,
+        pub file_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub size: Option<String>,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct EntryDetailSummary {
+        pub id: String,
+        #[serde(rename = "type")]
+        pub entry_type: String,
+        pub name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub folder: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub username: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub uris: Vec<String>,
+        pub has_totp: bool,
+        pub has_notes: bool,
+        pub reprompt: bool,
+        pub history_count: usize,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub revision_date: Option<String>,
+        pub available_fields: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub attachments: Vec<AttachmentSummary>,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct FieldValueReport {
+        pub entry_id: String,
+        pub entry_name: String,
+        pub field: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub value: Option<String>,
+        pub copied_to_clipboard: bool,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct TotpReport {
+        pub entry_id: String,
+        pub entry_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub code: Option<String>,
+        pub period: u64,
+        pub remaining_seconds: u64,
+        pub copied_to_clipboard: bool,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct HistoryVersionInfo {
+        pub version: usize,
+        pub current: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub last_used_date: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub password: Option<String>,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct HistoryReport {
+        pub entry_id: String,
+        pub entry_name: String,
+        pub versions: Vec<HistoryVersionInfo>,
+        pub copied_to_clipboard: bool,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct SessionReport {
+        pub action: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub account: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub email: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub server: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub status: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub changed: Option<bool>,
+        pub message: String,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct CustomFieldInput {
+        pub name: String,
+        pub value: String,
+        pub field_type: rbw::api::FieldType,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    pub struct LoginInput {
+        pub username: Option<String>,
+        pub password: Option<String>,
+        pub totp: Option<String>,
+        pub uris: Option<Vec<String>>,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    pub struct CardInput {
+        pub cardholder_name: Option<String>,
+        pub number: Option<String>,
+        pub brand: Option<String>,
+        pub exp_month: Option<String>,
+        pub exp_year: Option<String>,
+        pub code: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    pub struct IdentityInput {
+        pub title: Option<String>,
+        pub first_name: Option<String>,
+        pub middle_name: Option<String>,
+        pub last_name: Option<String>,
+        pub address1: Option<String>,
+        pub address2: Option<String>,
+        pub address3: Option<String>,
+        pub city: Option<String>,
+        pub state: Option<String>,
+        pub postal_code: Option<String>,
+        pub country: Option<String>,
+        pub phone: Option<String>,
+        pub email: Option<String>,
+        pub ssn: Option<String>,
+        pub license_number: Option<String>,
+        pub passport_number: Option<String>,
+        pub username: Option<String>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct CreateItemInput {
+        pub entry_type: EntryKind,
+        pub name: String,
+        pub folder: Option<String>,
+        pub notes: Option<String>,
+        pub fields: Vec<CustomFieldInput>,
+        pub login: Option<LoginInput>,
+        pub card: Option<CardInput>,
+        pub identity: Option<IdentityInput>,
+        pub generate_password: Option<(rbw::pwgen::Type, usize)>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct UpdateItemInput {
+        pub query: String,
+        pub match_username: Option<String>,
+        pub match_folder: Option<String>,
+        pub ignore_case: bool,
+        pub name: Option<String>,
+        pub folder: Option<String>,
+        pub clear_folder: bool,
+        pub notes: Option<String>,
+        pub fields: Option<Vec<CustomFieldInput>>,
+        pub login: Option<LoginInput>,
+        pub card: Option<CardInput>,
+        pub identity: Option<IdentityInput>,
+        pub generate_password: Option<(rbw::pwgen::Type, usize)>,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct WriteItemReport {
+        pub action: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub id: Option<String>,
+        pub name: String,
+        #[serde(rename = "type")]
+        pub entry_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub folder: Option<String>,
+        pub password_generated: bool,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct DeleteReport {
+        pub deleted: bool,
+        pub target: String,
+        pub entry_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub entry_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub attachment_id: Option<String>,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    pub struct AttachmentTransferReport {
+        pub action: String,
+        pub entry_id: String,
+        pub attachment_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub file_name: Option<String>,
+        pub path: String,
+        pub bytes: usize,
+    }
+
+    fn account_label(ctx: &AccountContext) -> &str {
+        ctx.name
+            .as_deref()
+            .or(ctx.config.email.as_deref())
+            .unwrap_or("default")
+    }
+
+    fn require_logged_in_db(
+        ctx: &AccountContext,
+    ) -> anyhow::Result<rbw::db::Db> {
+        let label = account_label(ctx);
+        let db = load_db(&ctx.config).map_err(|_| {
+            anyhow::anyhow!(
+                "account '{label}' is logged out (no local vault database); \
+                 run `rbw login` in a terminal first"
+            )
+        })?;
+        if db.needs_login() {
+            anyhow::bail!(
+                "account '{label}' is logged out; \
+                 run `rbw login` in a terminal first"
+            );
+        }
+        Ok(db)
+    }
+
+    fn require_unlocked(
+        account: Option<&str>,
+    ) -> anyhow::Result<(AccountContext, rbw::db::Db)> {
+        let ctx = AccountContext::load(account)?;
+        let db = require_logged_in_db(&ctx)?;
+        let _ = check_agent_version();
+        if let Err(err) = crate::actions::unlocked(ctx.account_ref()) {
+            let label = account_label(&ctx);
+            anyhow::bail!(
+                "vault for account '{label}' is locked ({err}); \
+                 call vault_session with action='unlock' (triggers local \
+                 Touch ID / YubiKey / pinentry) or run `rbw unlock` in a terminal"
+            );
+        }
+        Ok((ctx, db))
+    }
+
+    fn copy_to_clipboard_value(val: &str) -> anyhow::Result<()> {
+        #[cfg(feature = "clipboard")]
+        {
+            clipboard_store(val)
+        }
+        #[cfg(not(feature = "clipboard"))]
+        {
+            let _ = val;
+            anyhow::bail!(
+                "clipboard support is not enabled in this rbw build \
+                 (compiled without the `clipboard` feature)"
+            )
+        }
+    }
+
+    fn list_folders_for_ctx(
+        ctx: &AccountContext,
+        db: &mut rbw::db::Db,
+    ) -> anyhow::Result<Vec<FolderInfo>> {
+        let access_token = db
+            .access_token
+            .as_deref()
+            .context("missing access token; run `rbw login`")?
+            .to_string();
+        let refresh_token = db
+            .refresh_token
+            .as_deref()
+            .context("missing refresh token; run `rbw login`")?
+            .to_string();
+        let (new_access_token, raw_folders) = rbw::actions::list_folders(
+            &ctx.config,
+            &access_token,
+            &refresh_token,
+        )?;
+        if let Some(token) = new_access_token {
+            db.access_token = Some(token);
+            save_db(&ctx.config, db)?;
+        }
+        let mut folders: Vec<FolderInfo> = raw_folders
+            .into_iter()
+            .map(|(id, enc_name)| {
+                let name = crate::actions::decrypt(
+                    ctx.account_ref(),
+                    &enc_name,
+                    None,
+                    None,
+                )?;
+                Ok(FolderInfo { id, name })
+            })
+            .collect::<anyhow::Result<_>>()?;
+        folders.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        Ok(folders)
+    }
+
+    fn resolve_or_create_folder_id(
+        ctx: &AccountContext,
+        db: &mut rbw::db::Db,
+        folder_name: &str,
+    ) -> anyhow::Result<String> {
+        let folders = list_folders_for_ctx(ctx, db)?;
+        if let Some(found) = folders.iter().find(|f| f.name == folder_name) {
+            return Ok(found.id.clone());
+        }
+        let access_token = db
+            .access_token
+            .as_deref()
+            .context("missing access token; run `rbw login`")?
+            .to_string();
+        let refresh_token = db
+            .refresh_token
+            .as_deref()
+            .context("missing refresh token; run `rbw login`")?
+            .to_string();
+        let encrypted_name =
+            crate::actions::encrypt(ctx.account_ref(), folder_name, None)?;
+        let (new_access_token, id) = rbw::actions::create_folder(
+            &ctx.config,
+            &access_token,
+            &refresh_token,
+            &encrypted_name,
+        )?;
+        if let Some(token) = new_access_token {
+            db.access_token = Some(token);
+            save_db(&ctx.config, db)?;
+        }
+        Ok(id)
+    }
+
+    pub fn status(
+        account: Option<&str>,
+        include_folders: bool,
+    ) -> anyhow::Result<StatusReport> {
+        let cf = match rbw::config::ConfigFile::load() {
+            Ok(cf) => cf,
+            Err(rbw::error::Error::LoadConfig { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                rbw::config::ConfigFile::new()
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        let agent_running = crate::sock::Sock::connect().is_ok();
+        let unlocked = unlocked_account_set();
+        let entries = cf.entries();
+        let active_account = cf.effective_active_account_name();
+        let selected_account = account.map_or_else(
+            || active_account.clone(),
+            |sel| {
+                cf.resolve_config(Some(sel))
+                    .ok()
+                    .and_then(|(name, _)| name)
+                    .or_else(|| Some(sel.to_string()))
+            },
+        );
+
+        let accounts: Vec<AccountInfo> = entries
+            .iter()
+            .map(|entry| AccountInfo {
+                name: entry.name.clone(),
+                email: entry.config.email.clone(),
+                server: entry.config.server_display_name(),
+                base_url: entry.config.base_url.clone(),
+                active: entry.active,
+                status: account_status(&entry.config, &unlocked)
+                    .label()
+                    .to_string(),
+            })
+            .collect();
+
+        let folders = if include_folders {
+            let (ctx, mut db) = require_unlocked(account)?;
+            Some(list_folders_for_ctx(&ctx, &mut db)?)
+        } else {
+            None
+        };
+
+        Ok(StatusReport {
+            agent_running,
+            active_account,
+            selected_account,
+            accounts,
+            folders,
+        })
+    }
+
+    fn parse_search_url(raw: &str) -> anyhow::Result<url::Url> {
+        let trimmed = raw.trim();
+        if let Ok(u) = url::Url::parse(trimmed)
+            && u.is_special()
+        {
+            return Ok(u);
+        }
+        if !trimmed.contains("://")
+            && let Ok(u) = url::Url::parse(&format!("https://{trimmed}"))
+            && u.is_special()
+        {
+            return Ok(u);
+        }
+        anyhow::bail!("invalid URL filter '{raw}'")
+    }
+
+    pub fn search(
+        account: Option<&str>,
+        query: Option<&str>,
+        url_filter: Option<&str>,
+        folder: Option<&str>,
+        entry_type: Option<EntryKind>,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<SearchReport> {
+        let (ctx, db) = require_unlocked(account)?;
+        let parsed_url = url_filter.map(parse_search_url).transpose()?;
+        let query = query.map(str::trim).filter(|q| !q.is_empty());
+        let folder = folder.map(str::trim).filter(|f| !f.is_empty());
+        let limit = limit.clamp(1, 200);
+
+        let mut summaries = Vec::new();
+        for entry in &db.entries {
+            let kind = EntryKind::from_entry_data(&entry.data);
+            if let Some(want_kind) = entry_type
+                && kind != want_kind
+            {
+                continue;
+            }
+
+            let has_totp = matches!(
+                &entry.data,
+                rbw::db::EntryData::Login { totp: Some(_), .. }
+            );
+            let attachment_count = entry.attachments.len();
+            let reprompt = entry.master_password_reprompt();
+
+            if let Some(q) = query {
+                let decrypted =
+                    decrypt_search_cipher(ctx.account_ref(), entry)?;
+                if let Some(want_folder) = folder
+                    && !decrypted
+                        .folder
+                        .as_deref()
+                        .is_some_and(|f| f.eq_ignore_ascii_case(want_folder))
+                {
+                    continue;
+                }
+                if let Some(ref target_url) = parsed_url
+                    && decrypted.uris.iter().all(|(uri, match_type)| {
+                        !matches_url(uri, *match_type, target_url)
+                    })
+                {
+                    continue;
+                }
+                if !decrypted.search_match(q, None) {
+                    continue;
+                }
+                summaries.push(EntrySummary {
+                    id: decrypted.id,
+                    entry_type: kind.as_str().to_string(),
+                    name: decrypted.name,
+                    username: decrypted.user,
+                    folder: decrypted.folder,
+                    uris: decrypted
+                        .uris
+                        .into_iter()
+                        .map(|(u, _)| u)
+                        .collect(),
+                    has_totp,
+                    attachment_count,
+                    reprompt,
+                });
+            } else {
+                let decrypted_folder = entry
+                    .folder
+                    .as_ref()
+                    .map(|f| {
+                        crate::actions::decrypt(
+                            ctx.account_ref(),
+                            f,
+                            None,
+                            None,
+                        )
+                    })
+                    .transpose()?;
+                if let Some(want_folder) = folder
+                    && !decrypted_folder
+                        .as_deref()
+                        .is_some_and(|f| f.eq_ignore_ascii_case(want_folder))
+                {
+                    continue;
+                }
+                let uris_with_match: Vec<(
+                    String,
+                    Option<rbw::api::UriMatchType>,
+                )> = if let rbw::db::EntryData::Login { uris, .. } =
+                    &entry.data
+                {
+                    uris.iter()
+                        .filter_map(|s| {
+                            decrypt_field(
+                                ctx.account_ref(),
+                                Field::Uris,
+                                Some(&s.uri),
+                                entry.key.as_deref(),
+                                entry.org_id.as_deref(),
+                            )
+                            .map(|uri| (uri, s.match_type))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                if let Some(ref target_url) = parsed_url
+                    && uris_with_match.iter().all(|(uri, match_type)| {
+                        !matches_url(uri, *match_type, target_url)
+                    })
+                {
+                    continue;
+                }
+                let name = crate::actions::decrypt(
+                    ctx.account_ref(),
+                    &entry.name,
+                    entry.key.as_deref(),
+                    entry.org_id.as_deref(),
+                )?;
+                let username = match &entry.data {
+                    rbw::db::EntryData::Login { username, .. } => {
+                        decrypt_field(
+                            ctx.account_ref(),
+                            Field::Username,
+                            username.as_deref(),
+                            entry.key.as_deref(),
+                            entry.org_id.as_deref(),
+                        )
+                    }
+                    _ => None,
+                };
+                summaries.push(EntrySummary {
+                    id: entry.id.clone(),
+                    entry_type: kind.as_str().to_string(),
+                    name,
+                    username,
+                    folder: decrypted_folder,
+                    uris: uris_with_match
+                        .into_iter()
+                        .map(|(u, _)| u)
+                        .collect(),
+                    has_totp,
+                    attachment_count,
+                    reprompt,
+                });
+            }
+        }
+
+        summaries.sort_unstable_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then_with(|| a.username.cmp(&b.username))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        let total = summaries.len();
+        let items: Vec<EntrySummary> =
+            summaries.into_iter().skip(offset).take(limit).collect();
+        let returned = items.len();
+
+        Ok(SearchReport {
+            total,
+            returned,
+            offset,
+            limit,
+            items,
+        })
+    }
+
+    fn available_fields_from_raw_entry(
+        account: Option<&str>,
+        entry: &rbw::db::Entry,
+    ) -> anyhow::Result<Vec<String>> {
+        let mut fields = Vec::new();
+        match &entry.data {
+            rbw::db::EntryData::Login {
+                username,
+                password,
+                totp,
+                uris,
+                ..
+            } => {
+                if username.is_some() {
+                    fields.push(Field::Username.as_str().to_string());
+                }
+                if password.is_some() {
+                    fields.push(Field::Password.as_str().to_string());
+                }
+                if totp.is_some() {
+                    fields.push(Field::Totp.as_str().to_string());
+                }
+                if !uris.is_empty() {
+                    fields.push(Field::Uris.as_str().to_string());
+                }
+            }
+            rbw::db::EntryData::Card {
+                cardholder_name,
+                number,
+                brand,
+                exp_month,
+                exp_year,
+                code,
+            } => {
+                if number.is_some() {
+                    fields.push(Field::CardNumber.as_str().to_string());
+                }
+                if exp_month.is_some() {
+                    fields.push(Field::ExpMonth.as_str().to_string());
+                }
+                if exp_year.is_some() {
+                    fields.push(Field::ExpYear.as_str().to_string());
+                }
+                if code.is_some() {
+                    fields.push(Field::Cvv.as_str().to_string());
+                }
+                if cardholder_name.is_some() {
+                    fields.push(Field::Cardholder.as_str().to_string());
+                }
+                if brand.is_some() {
+                    fields.push(Field::Brand.as_str().to_string());
+                }
+            }
+            rbw::db::EntryData::Identity {
+                title,
+                first_name,
+                middle_name,
+                last_name,
+                address1,
+                address2,
+                address3,
+                city,
+                state,
+                postal_code,
+                country,
+                phone,
+                email,
+                ssn,
+                license_number,
+                passport_number,
+                username,
+            } => {
+                if [title, first_name, middle_name, last_name]
+                    .iter()
+                    .any(|f| f.is_some())
+                {
+                    fields.push("name".to_string());
+                }
+                if email.is_some() {
+                    fields.push(Field::Email.as_str().to_string());
+                }
+                if [address1, address2, address3].iter().any(|f| f.is_some())
+                {
+                    fields.push("address".to_string());
+                }
+                if city.is_some() {
+                    fields.push(Field::City.as_str().to_string());
+                }
+                if state.is_some() {
+                    fields.push(Field::State.as_str().to_string());
+                }
+                if postal_code.is_some() {
+                    fields.push(Field::PostalCode.as_str().to_string());
+                }
+                if country.is_some() {
+                    fields.push(Field::Country.as_str().to_string());
+                }
+                if phone.is_some() {
+                    fields.push(Field::Phone.as_str().to_string());
+                }
+                if ssn.is_some() {
+                    fields.push(Field::Ssn.as_str().to_string());
+                }
+                if license_number.is_some() {
+                    fields.push(Field::License.as_str().to_string());
+                }
+                if passport_number.is_some() {
+                    fields.push(Field::Passport.as_str().to_string());
+                }
+                if username.is_some() {
+                    fields.push(Field::Username.as_str().to_string());
+                }
+            }
+            rbw::db::EntryData::SecureNote => {}
+            rbw::db::EntryData::SshKey {
+                private_key,
+                public_key,
+                fingerprint,
+            } => {
+                if public_key.is_some() {
+                    fields.push(Field::PublicKey.as_str().to_string());
+                }
+                if private_key.is_some() {
+                    fields.push(Field::PrivateKey.as_str().to_string());
+                }
+                if fingerprint.is_some() {
+                    fields.push(Field::Fingerprint.as_str().to_string());
+                }
+            }
+        }
+        if entry.notes.is_some() {
+            fields.push(Field::Notes.as_str().to_string());
+        }
+        for custom in &entry.fields {
+            if let Some(enc_name) = &custom.name {
+                let name = crate::actions::decrypt(
+                    account,
+                    enc_name,
+                    entry.key.as_deref(),
+                    entry.org_id.as_deref(),
+                )?;
+                fields.push(name);
+            }
+        }
+        Ok(fields)
+    }
+
+    pub fn get_summary(
+        account: Option<&str>,
+        query: &str,
+        username: Option<&str>,
+        folder: Option<&str>,
+        ignore_case: bool,
+    ) -> anyhow::Result<EntryDetailSummary> {
+        let (ctx, db) = require_unlocked(account)?;
+        let Ok(needle) = parse_needle(query);
+        let desc = format!(
+            "{}{}",
+            username.map_or_else(String::new, |s| format!("{s}@")),
+            needle
+        );
+        let entry = find_attachment_entry(
+            ctx.account_ref(),
+            &db,
+            needle,
+            username,
+            folder,
+            ignore_case,
+        )
+        .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+
+        let name = crate::actions::decrypt(
+            ctx.account_ref(),
+            &entry.name,
+            entry.key.as_deref(),
+            entry.org_id.as_deref(),
+        )?;
+        let folder = entry
+            .folder
+            .as_ref()
+            .map(|f| {
+                crate::actions::decrypt(ctx.account_ref(), f, None, None)
+            })
+            .transpose()?;
+        let (entry_username, uris, has_totp) = match &entry.data {
+            rbw::db::EntryData::Login {
+                username,
+                totp,
+                uris,
+                ..
+            } => {
+                let u = decrypt_field(
+                    ctx.account_ref(),
+                    Field::Username,
+                    username.as_deref(),
+                    entry.key.as_deref(),
+                    entry.org_id.as_deref(),
+                );
+                let decrypted_uris = uris
+                    .iter()
+                    .filter_map(|s| {
+                        decrypt_field(
+                            ctx.account_ref(),
+                            Field::Uris,
+                            Some(&s.uri),
+                            entry.key.as_deref(),
+                            entry.org_id.as_deref(),
+                        )
+                    })
+                    .collect();
+                (u, decrypted_uris, totp.is_some())
+            }
+            _ => (None, Vec::new(), false),
+        };
+        let available_fields =
+            available_fields_from_raw_entry(ctx.account_ref(), &entry)?;
+        let attachments = decrypt_attachments(ctx.account_ref(), &entry)?
+            .into_iter()
+            .map(|a| AttachmentSummary {
+                id: a.id,
+                file_name: a.file_name,
+                size: a.size,
+            })
+            .collect();
+
+        Ok(EntryDetailSummary {
+            id: entry.id.clone(),
+            entry_type: EntryKind::from_entry_data(&entry.data)
+                .as_str()
+                .to_string(),
+            name,
+            folder,
+            username: entry_username,
+            uris,
+            has_totp,
+            has_notes: entry.notes.is_some(),
+            reprompt: entry.master_password_reprompt(),
+            history_count: entry.history.len(),
+            revision_date: entry.revision_date,
+            available_fields,
+            attachments,
+        })
+    }
+
+    fn lookup_custom_field(
+        fields: &[DecryptedField],
+        needle: &str,
+    ) -> Option<String> {
+        let lower = needle.to_lowercase();
+        if let Some(exact) = fields.iter().find(|f| {
+            f.name.as_deref().is_some_and(|n| n.to_lowercase() == lower)
+        }) {
+            return Some(exact.value.clone().unwrap_or_default());
+        }
+        fields
+            .iter()
+            .find(|f| {
+                f.name
+                    .as_deref()
+                    .is_some_and(|n| n.to_lowercase().contains(&lower))
+            })
+            .map(|f| f.value.clone().unwrap_or_default())
+    }
+
+    fn extract_field_value(
+        cipher: &DecryptedCipher,
+        field_name: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let lower = field_name.trim().to_lowercase();
+        if lower == "totp_secret" {
+            return Ok(match &cipher.data {
+                DecryptedData::Login { totp, .. } => totp.clone(),
+                _ => None,
+            });
+        }
+        if let Ok(parsed) = lower.parse::<Field>() {
+            match (&cipher.data, parsed) {
+                (_, Field::Notes) => return Ok(cipher.notes.clone()),
+                (
+                    DecryptedData::Login { username, .. }
+                    | DecryptedData::Identity { username, .. },
+                    Field::Username,
+                ) => {
+                    return Ok(username.clone());
+                }
+                (DecryptedData::Login { password, .. }, Field::Password) => {
+                    return Ok(password.clone());
+                }
+                (DecryptedData::Login { totp, .. }, Field::Totp) => {
+                    return totp.as_deref().map(generate_totp).transpose();
+                }
+                (DecryptedData::Login { uris, .. }, Field::Uris) => {
+                    return Ok(uris.as_ref().map(|u| {
+                        u.iter()
+                            .map(|uri| uri.uri.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    }));
+                }
+                (DecryptedData::Card { number, .. }, Field::CardNumber) => {
+                    return Ok(number.clone());
+                }
+                (
+                    DecryptedData::Card {
+                        exp_month: Some(m),
+                        exp_year: Some(y),
+                        ..
+                    },
+                    Field::Expiration,
+                ) => return Ok(Some(format!("{m}/{y}"))),
+                (DecryptedData::Card { exp_month, .. }, Field::ExpMonth) => {
+                    return Ok(exp_month.clone());
+                }
+                (DecryptedData::Card { exp_year, .. }, Field::ExpYear) => {
+                    return Ok(exp_year.clone());
+                }
+                (DecryptedData::Card { code, .. }, Field::Cvv) => {
+                    return Ok(code.clone());
+                }
+                (
+                    DecryptedData::Card {
+                        cardholder_name, ..
+                    },
+                    Field::Name | Field::Cardholder,
+                ) => return Ok(cardholder_name.clone()),
+                (DecryptedData::Card { brand, .. }, Field::Brand) => {
+                    return Ok(brand.clone());
+                }
+                (
+                    DecryptedData::Identity {
+                        title,
+                        first_name,
+                        middle_name,
+                        last_name,
+                        ..
+                    },
+                    Field::Name | Field::IdentityName,
+                ) => {
+                    let parts: Vec<&str> =
+                        [title, first_name, middle_name, last_name]
+                            .into_iter()
+                            .filter_map(|p| p.as_deref())
+                            .collect();
+                    return Ok((!parts.is_empty()).then(|| parts.join(" ")));
+                }
+                (DecryptedData::Identity { title, .. }, Field::Title) => {
+                    return Ok(title.clone());
+                }
+                (
+                    DecryptedData::Identity { first_name, .. },
+                    Field::FirstName,
+                ) => return Ok(first_name.clone()),
+                (
+                    DecryptedData::Identity { middle_name, .. },
+                    Field::MiddleName,
+                ) => return Ok(middle_name.clone()),
+                (
+                    DecryptedData::Identity { last_name, .. },
+                    Field::LastName,
+                ) => return Ok(last_name.clone()),
+                (
+                    DecryptedData::Identity {
+                        address1,
+                        address2,
+                        address3,
+                        ..
+                    },
+                    Field::Address,
+                ) => {
+                    let parts: Vec<&str> = [address1, address2, address3]
+                        .into_iter()
+                        .filter_map(|p| p.as_deref())
+                        .collect();
+                    return Ok((!parts.is_empty()).then(|| parts.join("\n")));
+                }
+                (
+                    DecryptedData::Identity { address1, .. },
+                    Field::Address1,
+                ) => {
+                    return Ok(address1.clone());
+                }
+                (
+                    DecryptedData::Identity { address2, .. },
+                    Field::Address2,
+                ) => {
+                    return Ok(address2.clone());
+                }
+                (
+                    DecryptedData::Identity { address3, .. },
+                    Field::Address3,
+                ) => {
+                    return Ok(address3.clone());
+                }
+                (DecryptedData::Identity { city, .. }, Field::City) => {
+                    return Ok(city.clone());
+                }
+                (DecryptedData::Identity { state, .. }, Field::State) => {
+                    return Ok(state.clone());
+                }
+                (
+                    DecryptedData::Identity { postal_code, .. },
+                    Field::PostalCode,
+                ) => return Ok(postal_code.clone()),
+                (DecryptedData::Identity { country, .. }, Field::Country) => {
+                    return Ok(country.clone());
+                }
+                (DecryptedData::Identity { phone, .. }, Field::Phone) => {
+                    return Ok(phone.clone());
+                }
+                (DecryptedData::Identity { email, .. }, Field::Email) => {
+                    return Ok(email.clone());
+                }
+                (DecryptedData::Identity { ssn, .. }, Field::Ssn) => {
+                    return Ok(ssn.clone());
+                }
+                (
+                    DecryptedData::Identity { license_number, .. },
+                    Field::License,
+                ) => return Ok(license_number.clone()),
+                (
+                    DecryptedData::Identity {
+                        passport_number, ..
+                    },
+                    Field::Passport,
+                ) => return Ok(passport_number.clone()),
+                (
+                    DecryptedData::SshKey { public_key, .. },
+                    Field::PublicKey,
+                ) => return Ok(public_key.clone()),
+                (
+                    DecryptedData::SshKey { private_key, .. },
+                    Field::PrivateKey,
+                ) => return Ok(private_key.clone()),
+                (
+                    DecryptedData::SshKey { fingerprint, .. },
+                    Field::Fingerprint,
+                ) => return Ok(fingerprint.clone()),
+                _ => {}
+            }
+        }
+        Ok(lookup_custom_field(&cipher.fields, field_name))
+    }
+
+    pub fn get_field(
+        account: Option<&str>,
+        query: &str,
+        field_name: &str,
+        username: Option<&str>,
+        folder: Option<&str>,
+        ignore_case: bool,
+        copy_to_clipboard: bool,
+    ) -> anyhow::Result<FieldValueReport> {
+        let (ctx, db) = require_unlocked(account)?;
+        let Ok(needle) = parse_needle(query);
+        let desc = format!(
+            "{}{}",
+            username.map_or_else(String::new, |s| format!("{s}@")),
+            needle
+        );
+        let (_, decrypted) = find_entry(
+            ctx.account_ref(),
+            &db,
+            needle,
+            username,
+            folder,
+            ignore_case,
+        )
+        .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+
+        let Some(value) = extract_field_value(&decrypted, field_name)? else {
+            anyhow::bail!(
+                "field '{field_name}' not present on entry '{}'",
+                decrypted.name
+            );
+        };
+
+        if copy_to_clipboard {
+            copy_to_clipboard_value(&value)?;
+            Ok(FieldValueReport {
+                entry_id: decrypted.id,
+                entry_name: decrypted.name,
+                field: field_name.to_string(),
+                value: None,
+                copied_to_clipboard: true,
+            })
+        } else {
+            Ok(FieldValueReport {
+                entry_id: decrypted.id,
+                entry_name: decrypted.name,
+                field: field_name.to_string(),
+                value: Some(value),
+                copied_to_clipboard: false,
+            })
+        }
+    }
+
+    pub fn get_totp(
+        account: Option<&str>,
+        query: &str,
+        username: Option<&str>,
+        folder: Option<&str>,
+        ignore_case: bool,
+        copy_to_clipboard: bool,
+    ) -> anyhow::Result<TotpReport> {
+        let (ctx, db) = require_unlocked(account)?;
+        let Ok(needle) = parse_needle(query);
+        let desc = format!(
+            "{}{}",
+            username.map_or_else(String::new, |s| format!("{s}@")),
+            needle
+        );
+        let (_, decrypted) = find_entry(
+            ctx.account_ref(),
+            &db,
+            needle,
+            username,
+            folder,
+            ignore_case,
+        )
+        .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+
+        let DecryptedData::Login { totp, .. } = &decrypted.data else {
+            anyhow::bail!("entry '{}' is not a login entry", decrypted.name);
+        };
+        let Some(secret) = totp.as_deref() else {
+            anyhow::bail!(
+                "entry '{}' does not contain a TOTP secret",
+                decrypted.name
+            );
+        };
+
+        let params = parse_totp_secret(secret)?;
+        let period = params.period.max(1);
+        let code = generate_totp(secret)?;
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let remaining_seconds = period - (now_secs % period);
+
+        if copy_to_clipboard {
+            copy_to_clipboard_value(&code)?;
+            Ok(TotpReport {
+                entry_id: decrypted.id,
+                entry_name: decrypted.name,
+                code: None,
+                period,
+                remaining_seconds,
+                copied_to_clipboard: true,
+            })
+        } else {
+            Ok(TotpReport {
+                entry_id: decrypted.id,
+                entry_name: decrypted.name,
+                code: Some(code),
+                period,
+                remaining_seconds,
+                copied_to_clipboard: false,
+            })
+        }
+    }
+
+    pub fn get_history(
+        account: Option<&str>,
+        query: &str,
+        version: Option<&str>,
+        username: Option<&str>,
+        folder: Option<&str>,
+        ignore_case: bool,
+        copy_to_clipboard: bool,
+    ) -> anyhow::Result<HistoryReport> {
+        let (ctx, db) = require_unlocked(account)?;
+        let Ok(needle) = parse_needle(query);
+        let desc = format!(
+            "{}{}",
+            username.map_or_else(String::new, |s| format!("{s}@")),
+            needle
+        );
+        let (_, decrypted) = find_entry(
+            ctx.account_ref(),
+            &db,
+            needle,
+            username,
+            folder,
+            ignore_case,
+        )
+        .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+
+        let versions = build_password_versions(&decrypted);
+        if versions.is_empty() {
+            if !matches!(decrypted.data, DecryptedData::Login { .. }) {
+                anyhow::bail!(
+                    "entry '{}' is not a login entry and has no password history",
+                    decrypted.name
+                );
+            }
+            if version.is_some() {
+                anyhow::bail!(
+                    "entry '{}' has no password versions",
+                    decrypted.name
+                );
+            }
+            return Ok(HistoryReport {
+                entry_id: decrypted.id,
+                entry_name: decrypted.name,
+                versions: Vec::new(),
+                copied_to_clipboard: false,
+            });
+        }
+
+        if let Some(selector) = version {
+            let selected = select_password_version(&versions, selector)?;
+            if copy_to_clipboard {
+                copy_to_clipboard_value(&selected.password)?;
+                return Ok(HistoryReport {
+                    entry_id: decrypted.id,
+                    entry_name: decrypted.name,
+                    versions: vec![HistoryVersionInfo {
+                        version: selected.version,
+                        current: selected.current,
+                        last_used_date: selected.last_used_date.clone(),
+                        password: None,
+                    }],
+                    copied_to_clipboard: true,
+                });
+            }
+            return Ok(HistoryReport {
+                entry_id: decrypted.id,
+                entry_name: decrypted.name,
+                versions: vec![HistoryVersionInfo {
+                    version: selected.version,
+                    current: selected.current,
+                    last_used_date: selected.last_used_date.clone(),
+                    password: Some(selected.password.clone()),
+                }],
+                copied_to_clipboard: false,
+            });
+        }
+
+        if copy_to_clipboard {
+            anyhow::bail!(
+                "copy_to_clipboard with mode='history' requires specifying a `version` (e.g. '1' or 'current')"
+            );
+        }
+
+        Ok(HistoryReport {
+            entry_id: decrypted.id,
+            entry_name: decrypted.name,
+            versions: versions
+                .into_iter()
+                .map(|v| HistoryVersionInfo {
+                    version: v.version,
+                    current: v.current,
+                    last_used_date: v.last_used_date,
+                    password: Some(v.password),
+                })
+                .collect(),
+            copied_to_clipboard: false,
+        })
+    }
+
+    pub fn get_full(
+        account: Option<&str>,
+        query: &str,
+        username: Option<&str>,
+        folder: Option<&str>,
+        ignore_case: bool,
+    ) -> anyhow::Result<serde_json::Value> {
+        let (ctx, db) = require_unlocked(account)?;
+        let Ok(needle) = parse_needle(query);
+        let desc = format!(
+            "{}{}",
+            username.map_or_else(String::new, |s| format!("{s}@")),
+            needle
+        );
+        let (_, decrypted) = find_entry(
+            ctx.account_ref(),
+            &db,
+            needle,
+            username,
+            folder,
+            ignore_case,
+        )
+        .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+        serde_json::to_value(&decrypted)
+            .context("failed to serialize decrypted entry")
+    }
+
+    pub fn session_unlock(
+        account: Option<&str>,
+    ) -> anyhow::Result<SessionReport> {
+        let ctx = AccountContext::load(account)?;
+        let _ = require_logged_in_db(&ctx)?;
+        ensure_agent_running()?;
+        crate::actions::unlock(ctx.account_ref())?;
+        let label = account_label(&ctx).to_string();
+        Ok(SessionReport {
+            action: "unlock".to_string(),
+            account: Some(label.clone()),
+            email: ctx.config.email.clone(),
+            server: Some(ctx.config.server_display_name()),
+            status: Some("unlocked".to_string()),
+            changed: None,
+            message: format!("Unlocked vault for account '{label}'"),
+        })
+    }
+
+    pub fn session_lock(
+        account: Option<&str>,
+        all: bool,
+    ) -> anyhow::Result<SessionReport> {
+        if all {
+            let _ = check_agent_version();
+            crate::actions::lock_all()?;
+            return Ok(SessionReport {
+                action: "lock".to_string(),
+                account: None,
+                email: None,
+                server: None,
+                status: Some("locked".to_string()),
+                changed: None,
+                message: "Locked all accounts".to_string(),
+            });
+        }
+        let ctx = AccountContext::load(account)?;
+        let label = account_label(&ctx).to_string();
+        if crate::sock::Sock::connect().is_ok() {
+            let _ = check_agent_version();
+            crate::actions::lock(ctx.account_ref())?;
+        }
+        Ok(SessionReport {
+            action: "lock".to_string(),
+            account: Some(label.clone()),
+            email: ctx.config.email.clone(),
+            server: Some(ctx.config.server_display_name()),
+            status: Some("locked".to_string()),
+            changed: None,
+            message: format!("Locked vault for account '{label}'"),
+        })
+    }
+
+    pub fn session_sync(
+        account: Option<&str>,
+    ) -> anyhow::Result<SessionReport> {
+        let ctx = AccountContext::load(account)?;
+        let _ = require_logged_in_db(&ctx)?;
+        ensure_agent_running()?;
+        crate::actions::sync(ctx.account_ref())?;
+        let label = account_label(&ctx).to_string();
+        Ok(SessionReport {
+            action: "sync".to_string(),
+            account: Some(label.clone()),
+            email: ctx.config.email.clone(),
+            server: Some(ctx.config.server_display_name()),
+            status: None,
+            changed: None,
+            message: format!("Synced vault for account '{label}'"),
+        })
+    }
+
+    pub fn session_switch_account(
+        target: Option<&str>,
+        email: Option<&str>,
+        server: Option<&str>,
+    ) -> anyhow::Result<SessionReport> {
+        if target.is_none() && email.is_none() && server.is_none() {
+            anyhow::bail!(
+                "switch_account requires at least one of `target`, `email`, or `server`"
+            );
+        }
+        let mut cf = rbw::config::ConfigFile::load().map_err(|e| {
+            if matches!(e, rbw::error::Error::LoadConfig { .. }) {
+                anyhow::anyhow!(
+                    "no accounts configured; run `rbw account add` first"
+                )
+            } else {
+                anyhow::Error::new(e)
+            }
+        })?;
+        let matches = cf.find_by_filters(target, email, server);
+        let chosen = match matches.as_slice() {
+            [] => {
+                let sel =
+                    target.or(email).or(server).unwrap_or("<unspecified>");
+                return Err(anyhow::Error::new(
+                    rbw::error::Error::AccountNotFound {
+                        account: sel.to_string(),
+                    },
+                ));
+            }
+            [only] => only.clone(),
+            many => {
+                let sel =
+                    target.or(email).or(server).unwrap_or("<unspecified>");
+                return Err(anyhow::Error::new(
+                    rbw::error::Error::AccountAmbiguous {
+                        selector: sel.to_string(),
+                        matches: rbw::config::format_account_matches(many),
+                    },
+                ));
+            }
+        };
+        let changed = cf.switch_account(&chosen.name)?;
+        cf.save()?;
+        let unlocked = unlocked_account_set();
+        let status = account_status(&chosen.config, &unlocked).label();
+        let server_str = chosen.config.server_display_name();
+        Ok(SessionReport {
+            action: "switch_account".to_string(),
+            account: Some(chosen.name.clone()),
+            email: chosen.config.email.clone(),
+            server: Some(server_str),
+            status: Some(status.to_string()),
+            changed: Some(changed),
+            message: if changed {
+                format!(
+                    "Switched active account to '{}' [{status}]",
+                    chosen.name
+                )
+            } else {
+                format!("Already using account '{}' [{status}]", chosen.name)
+            },
+        })
+    }
+
+    pub fn create_folder(
+        account: Option<&str>,
+        name: &str,
+    ) -> anyhow::Result<FolderInfo> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("folder name cannot be empty");
+        }
+        let (ctx, mut db) = require_unlocked(account)?;
+        let id = resolve_or_create_folder_id(&ctx, &mut db, trimmed)?;
+        crate::actions::sync(ctx.account_ref())?;
+        Ok(FolderInfo {
+            id,
+            name: trimmed.to_string(),
+        })
+    }
+
+    fn encrypt_opt(
+        account: Option<&str>,
+        value: Option<&str>,
+        org_id: Option<&str>,
+    ) -> anyhow::Result<Option<String>> {
+        value
+            .map(|v| crate::actions::encrypt(account, v, org_id))
+            .transpose()
+    }
+
+    fn encrypt_custom_fields(
+        account: Option<&str>,
+        fields: &[CustomFieldInput],
+        org_id: Option<&str>,
+    ) -> anyhow::Result<Vec<rbw::db::Field>> {
+        fields
+            .iter()
+            .map(|f| {
+                Ok(rbw::db::Field {
+                    ty: Some(f.field_type),
+                    name: Some(crate::actions::encrypt(
+                        account, &f.name, org_id,
+                    )?),
+                    value: Some(crate::actions::encrypt(
+                        account, &f.value, org_id,
+                    )?),
+                    linked_id: None,
+                })
+            })
+            .collect()
+    }
+
+    pub fn create_item(
+        account: Option<&str>,
+        input: CreateItemInput,
+    ) -> anyhow::Result<WriteItemReport> {
+        if input.name.trim().is_empty() {
+            anyhow::bail!("entry name cannot be empty");
+        }
+        if input.entry_type == EntryKind::SshKey {
+            anyhow::bail!(
+                "creating SSH key items is not supported by rbw yet"
+            );
+        }
+        let (ctx, mut db) = require_unlocked(account)?;
+        let acct = ctx.account_ref();
+
+        let enc_name = crate::actions::encrypt(acct, &input.name, None)?;
+        let enc_notes = encrypt_opt(acct, input.notes.as_deref(), None)?;
+        let enc_fields = encrypt_custom_fields(acct, &input.fields, None)?;
+
+        let mut password_generated = false;
+        let entry_data = match input.entry_type {
+            EntryKind::Login => {
+                let login = input.login.unwrap_or_default();
+                let plain_password = if let Some(pw) = login.password {
+                    Some(pw)
+                } else if let Some((pw_ty, pw_len)) = input.generate_password
+                {
+                    password_generated = true;
+                    Some(rbw::pwgen::pwgen(pw_ty, pw_len))
+                } else {
+                    None
+                };
+                let uris = login
+                    .uris
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|u| {
+                        Ok(rbw::db::Uri {
+                            uri: crate::actions::encrypt(acct, &u, None)?,
+                            match_type: None,
+                        })
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                rbw::db::EntryData::Login {
+                    username: encrypt_opt(
+                        acct,
+                        login.username.as_deref(),
+                        None,
+                    )?,
+                    password: encrypt_opt(
+                        acct,
+                        plain_password.as_deref(),
+                        None,
+                    )?,
+                    totp: encrypt_opt(acct, login.totp.as_deref(), None)?,
+                    uris,
+                    password_revision_date: None,
+                }
+            }
+            EntryKind::Note => rbw::db::EntryData::SecureNote,
+            EntryKind::Card => {
+                let card = input.card.unwrap_or_default();
+                rbw::db::EntryData::Card {
+                    cardholder_name: encrypt_opt(
+                        acct,
+                        card.cardholder_name.as_deref(),
+                        None,
+                    )?,
+                    number: encrypt_opt(acct, card.number.as_deref(), None)?,
+                    brand: encrypt_opt(acct, card.brand.as_deref(), None)?,
+                    exp_month: encrypt_opt(
+                        acct,
+                        card.exp_month.as_deref(),
+                        None,
+                    )?,
+                    exp_year: encrypt_opt(
+                        acct,
+                        card.exp_year.as_deref(),
+                        None,
+                    )?,
+                    code: encrypt_opt(acct, card.code.as_deref(), None)?,
+                }
+            }
+            EntryKind::Identity => {
+                let id = input.identity.unwrap_or_default();
+                rbw::db::EntryData::Identity {
+                    title: encrypt_opt(acct, id.title.as_deref(), None)?,
+                    first_name: encrypt_opt(
+                        acct,
+                        id.first_name.as_deref(),
+                        None,
+                    )?,
+                    middle_name: encrypt_opt(
+                        acct,
+                        id.middle_name.as_deref(),
+                        None,
+                    )?,
+                    last_name: encrypt_opt(
+                        acct,
+                        id.last_name.as_deref(),
+                        None,
+                    )?,
+                    address1: encrypt_opt(
+                        acct,
+                        id.address1.as_deref(),
+                        None,
+                    )?,
+                    address2: encrypt_opt(
+                        acct,
+                        id.address2.as_deref(),
+                        None,
+                    )?,
+                    address3: encrypt_opt(
+                        acct,
+                        id.address3.as_deref(),
+                        None,
+                    )?,
+                    city: encrypt_opt(acct, id.city.as_deref(), None)?,
+                    state: encrypt_opt(acct, id.state.as_deref(), None)?,
+                    postal_code: encrypt_opt(
+                        acct,
+                        id.postal_code.as_deref(),
+                        None,
+                    )?,
+                    country: encrypt_opt(acct, id.country.as_deref(), None)?,
+                    phone: encrypt_opt(acct, id.phone.as_deref(), None)?,
+                    email: encrypt_opt(acct, id.email.as_deref(), None)?,
+                    ssn: encrypt_opt(acct, id.ssn.as_deref(), None)?,
+                    license_number: encrypt_opt(
+                        acct,
+                        id.license_number.as_deref(),
+                        None,
+                    )?,
+                    passport_number: encrypt_opt(
+                        acct,
+                        id.passport_number.as_deref(),
+                        None,
+                    )?,
+                    username: encrypt_opt(
+                        acct,
+                        id.username.as_deref(),
+                        None,
+                    )?,
+                }
+            }
+            EntryKind::SshKey => unreachable!(),
+        };
+
+        let folder_id = if let Some(ref folder_name) = input.folder {
+            Some(resolve_or_create_folder_id(&ctx, &mut db, folder_name)?)
+        } else {
+            None
+        };
+
+        let access_token = db
+            .access_token
+            .as_deref()
+            .context("missing access token")?
+            .to_string();
+        let refresh_token = db
+            .refresh_token
+            .as_deref()
+            .context("missing refresh token")?
+            .to_string();
+
+        let (new_access_token, created_id) = rbw::actions::add_with_fields(
+            &ctx.config,
+            &access_token,
+            &refresh_token,
+            &enc_name,
+            &entry_data,
+            &enc_fields,
+            enc_notes.as_deref(),
+            folder_id.as_deref(),
+        )?;
+        if let Some(token) = new_access_token {
+            db.access_token = Some(token);
+            save_db(&ctx.config, &db)?;
+        }
+
+        crate::actions::sync(acct)?;
+
+        Ok(WriteItemReport {
+            action: "create_item".to_string(),
+            id: created_id,
+            name: input.name,
+            entry_type: input.entry_type.as_str().to_string(),
+            folder: input.folder,
+            password_generated,
+        })
+    }
+
+    pub fn update_item(
+        account: Option<&str>,
+        input: UpdateItemInput,
+    ) -> anyhow::Result<WriteItemReport> {
+        let (ctx, mut db) = require_unlocked(account)?;
+        let acct = ctx.account_ref();
+        let Ok(needle) = parse_needle(&input.query);
+        let desc = format!(
+            "{}{}",
+            input
+                .match_username
+                .as_deref()
+                .map_or_else(String::new, |s| format!("{s}@")),
+            needle
+        );
+        let (entry, decrypted) = find_entry(
+            acct,
+            &db,
+            needle,
+            input.match_username.as_deref(),
+            input.match_folder.as_deref(),
+            input.ignore_case,
+        )
+        .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+
+        let org_id = entry.org_id.as_deref();
+        let final_plain_name =
+            input.name.clone().unwrap_or_else(|| decrypted.name.clone());
+        let enc_name = if let Some(ref new_name) = input.name {
+            if new_name.trim().is_empty() {
+                anyhow::bail!("entry name cannot be empty");
+            }
+            crate::actions::encrypt(acct, new_name, org_id)?
+        } else {
+            entry.name.clone()
+        };
+
+        let enc_notes = if let Some(ref new_notes) = input.notes {
+            if new_notes.is_empty() {
+                None
+            } else {
+                Some(crate::actions::encrypt(acct, new_notes, org_id)?)
+            }
+        } else {
+            entry.notes.clone()
+        };
+
+        let enc_fields = if let Some(ref new_fields) = input.fields {
+            encrypt_custom_fields(acct, new_fields, org_id)?
+        } else {
+            entry.fields.clone()
+        };
+
+        let (folder_uuid, final_folder_name) = if input.clear_folder {
+            (None, None)
+        } else if let Some(ref folder_name) = input.folder {
+            let fid =
+                resolve_or_create_folder_id(&ctx, &mut db, folder_name)?;
+            (Some(fid), Some(folder_name.clone()))
+        } else {
+            (entry.folder_id.clone(), decrypted.folder.clone())
+        };
+
+        let mut history = entry.history.clone();
+        let mut password_generated = false;
+        let entry_kind = EntryKind::from_entry_data(&entry.data);
+
+        let updated_data = match &entry.data {
+            rbw::db::EntryData::Login {
+                username: orig_username,
+                password: orig_password,
+                totp: orig_totp,
+                uris: orig_uris,
+                password_revision_date: orig_pw_rev,
+            } => {
+                let patch = input.login.unwrap_or_default();
+                let new_username = if let Some(ref u) = patch.username {
+                    Some(crate::actions::encrypt(acct, u, org_id)?)
+                } else {
+                    orig_username.clone()
+                };
+                let prev_plain_pw = match &decrypted.data {
+                    DecryptedData::Login { password, .. } => {
+                        password.as_deref()
+                    }
+                    _ => None,
+                };
+                let new_plain_pw = if let Some(pw) = patch.password {
+                    Some(pw)
+                } else if let Some((pw_ty, pw_len)) = input.generate_password
+                {
+                    password_generated = true;
+                    Some(rbw::pwgen::pwgen(pw_ty, pw_len))
+                } else {
+                    None
+                };
+                let (new_password, password_revision_date) =
+                    if let Some(ref plain_pw) = new_plain_pw {
+                        let changed =
+                            prev_plain_pw != Some(plain_pw.as_str());
+                        let enc_pw = Some(crate::actions::encrypt(
+                            acct, plain_pw, org_id,
+                        )?);
+                        let rev = if changed {
+                            let now = format!(
+                                "{}",
+                                humantime::format_rfc3339(
+                                    std::time::SystemTime::now()
+                                )
+                            );
+                            if let Some(prev_enc) = orig_password.clone() {
+                                history.insert(
+                                    0,
+                                    rbw::db::HistoryEntry {
+                                        last_used_date: now.clone(),
+                                        password: prev_enc,
+                                    },
+                                );
+                            }
+                            Some(now)
+                        } else {
+                            orig_pw_rev.clone()
+                        };
+                        (enc_pw, rev)
+                    } else {
+                        (orig_password.clone(), orig_pw_rev.clone())
+                    };
+
+                let new_totp = if let Some(ref t) = patch.totp {
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(crate::actions::encrypt(acct, t, org_id)?)
+                    }
+                } else {
+                    orig_totp.clone()
+                };
+                let new_uris = if let Some(uris) = patch.uris {
+                    uris.into_iter()
+                        .map(|u| {
+                            Ok(rbw::db::Uri {
+                                uri: crate::actions::encrypt(
+                                    acct, &u, org_id,
+                                )?,
+                                match_type: None,
+                            })
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()?
+                } else {
+                    orig_uris.clone()
+                };
+
+                rbw::db::EntryData::Login {
+                    username: new_username,
+                    password: new_password,
+                    totp: new_totp,
+                    uris: new_uris,
+                    password_revision_date,
+                }
+            }
+            rbw::db::EntryData::SecureNote => rbw::db::EntryData::SecureNote,
+            rbw::db::EntryData::Card {
+                cardholder_name,
+                number,
+                brand,
+                exp_month,
+                exp_year,
+                code,
+            } => {
+                let patch = input.card.unwrap_or_default();
+                let patch_opt = |new: Option<&str>, orig: &Option<String>| {
+                    if let Some(v) = new {
+                        Ok(Some(crate::actions::encrypt(acct, v, org_id)?))
+                    } else {
+                        Ok::<_, anyhow::Error>(orig.clone())
+                    }
+                };
+                rbw::db::EntryData::Card {
+                    cardholder_name: patch_opt(
+                        patch.cardholder_name.as_deref(),
+                        cardholder_name,
+                    )?,
+                    number: patch_opt(patch.number.as_deref(), number)?,
+                    brand: patch_opt(patch.brand.as_deref(), brand)?,
+                    exp_month: patch_opt(
+                        patch.exp_month.as_deref(),
+                        exp_month,
+                    )?,
+                    exp_year: patch_opt(patch.exp_year.as_deref(), exp_year)?,
+                    code: patch_opt(patch.code.as_deref(), code)?,
+                }
+            }
+            rbw::db::EntryData::Identity {
+                title,
+                first_name,
+                middle_name,
+                last_name,
+                address1,
+                address2,
+                address3,
+                city,
+                state,
+                postal_code,
+                country,
+                phone,
+                email,
+                ssn,
+                license_number,
+                passport_number,
+                username,
+            } => {
+                let patch = input.identity.unwrap_or_default();
+                let patch_opt = |new: Option<&str>, orig: &Option<String>| {
+                    if let Some(v) = new {
+                        Ok(Some(crate::actions::encrypt(acct, v, org_id)?))
+                    } else {
+                        Ok::<_, anyhow::Error>(orig.clone())
+                    }
+                };
+                rbw::db::EntryData::Identity {
+                    title: patch_opt(patch.title.as_deref(), title)?,
+                    first_name: patch_opt(
+                        patch.first_name.as_deref(),
+                        first_name,
+                    )?,
+                    middle_name: patch_opt(
+                        patch.middle_name.as_deref(),
+                        middle_name,
+                    )?,
+                    last_name: patch_opt(
+                        patch.last_name.as_deref(),
+                        last_name,
+                    )?,
+                    address1: patch_opt(patch.address1.as_deref(), address1)?,
+                    address2: patch_opt(patch.address2.as_deref(), address2)?,
+                    address3: patch_opt(patch.address3.as_deref(), address3)?,
+                    city: patch_opt(patch.city.as_deref(), city)?,
+                    state: patch_opt(patch.state.as_deref(), state)?,
+                    postal_code: patch_opt(
+                        patch.postal_code.as_deref(),
+                        postal_code,
+                    )?,
+                    country: patch_opt(patch.country.as_deref(), country)?,
+                    phone: patch_opt(patch.phone.as_deref(), phone)?,
+                    email: patch_opt(patch.email.as_deref(), email)?,
+                    ssn: patch_opt(patch.ssn.as_deref(), ssn)?,
+                    license_number: patch_opt(
+                        patch.license_number.as_deref(),
+                        license_number,
+                    )?,
+                    passport_number: patch_opt(
+                        patch.passport_number.as_deref(),
+                        passport_number,
+                    )?,
+                    username: patch_opt(patch.username.as_deref(), username)?,
+                }
+            }
+            rbw::db::EntryData::SshKey { .. } => {
+                anyhow::bail!(
+                    "updating SSH key items is not supported by rbw yet"
+                );
+            }
+        };
+
+        let access_token = db
+            .access_token
+            .as_deref()
+            .context("missing access token")?
+            .to_string();
+        let refresh_token = db
+            .refresh_token
+            .as_deref()
+            .context("missing refresh token")?
+            .to_string();
+
+        if let (Some(token), ()) = rbw::actions::edit(
+            &ctx.config,
+            &access_token,
+            &refresh_token,
+            &entry.id,
+            org_id,
+            &enc_name,
+            &updated_data,
+            &enc_fields,
+            enc_notes.as_deref(),
+            folder_uuid.as_deref(),
+            &history,
+        )? {
+            db.access_token = Some(token);
+            save_db(&ctx.config, &db)?;
+        }
+
+        crate::actions::sync(acct)?;
+
+        Ok(WriteItemReport {
+            action: "update_item".to_string(),
+            id: Some(entry.id),
+            name: final_plain_name,
+            entry_type: entry_kind.as_str().to_string(),
+            folder: final_folder_name,
+            password_generated,
+        })
+    }
+
+    pub fn delete_item(
+        account: Option<&str>,
+        query: &str,
+        username: Option<&str>,
+        folder: Option<&str>,
+        ignore_case: bool,
+    ) -> anyhow::Result<DeleteReport> {
+        let (ctx, mut db) = require_unlocked(account)?;
+        let acct = ctx.account_ref();
+        let Ok(needle) = parse_needle(query);
+        let desc = format!(
+            "{}{}",
+            username.map_or_else(String::new, |s| format!("{s}@")),
+            needle
+        );
+        let entry = find_attachment_entry(
+            acct,
+            &db,
+            needle,
+            username,
+            folder,
+            ignore_case,
+        )
+        .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+        let entry_name = crate::actions::decrypt(
+            acct,
+            &entry.name,
+            entry.key.as_deref(),
+            entry.org_id.as_deref(),
+        )
+        .ok();
+
+        let access_token = db
+            .access_token
+            .as_deref()
+            .context("missing access token")?
+            .to_string();
+        let refresh_token = db
+            .refresh_token
+            .as_deref()
+            .context("missing refresh token")?
+            .to_string();
+
+        if let (Some(token), ()) = rbw::actions::remove(
+            &ctx.config,
+            &access_token,
+            &refresh_token,
+            &entry.id,
+        )? {
+            db.access_token = Some(token);
+            save_db(&ctx.config, &db)?;
+        }
+
+        crate::actions::sync(acct)?;
+
+        Ok(DeleteReport {
+            deleted: true,
+            target: "item".to_string(),
+            entry_id: entry.id,
+            entry_name,
+            attachment_id: None,
+        })
+    }
+
+    pub fn delete_attachment(
+        account: Option<&str>,
+        query: &str,
+        attachment: &str,
+        username: Option<&str>,
+        folder: Option<&str>,
+        ignore_case: bool,
+    ) -> anyhow::Result<DeleteReport> {
+        let (ctx, db) = require_unlocked(account)?;
+        let acct = ctx.account_ref();
+        let Ok(needle) = parse_needle(query);
+        let desc = format!(
+            "{}{}",
+            username.map_or_else(String::new, |s| format!("{s}@")),
+            needle
+        );
+        let entry = find_attachment_entry(
+            acct,
+            &db,
+            needle,
+            username,
+            folder,
+            ignore_case,
+        )
+        .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+        let attachment_id = resolve_attachment_id(acct, &entry, attachment)?;
+
+        crate::actions::delete_attachment(acct, &entry.id, &attachment_id)?;
+        crate::actions::sync(acct)?;
+
+        Ok(DeleteReport {
+            deleted: true,
+            target: "attachment".to_string(),
+            entry_id: entry.id,
+            entry_name: None,
+            attachment_id: Some(attachment_id),
+        })
+    }
+
+    pub fn download_attachment(
+        account: Option<&str>,
+        query: &str,
+        attachment: &str,
+        output: &std::path::Path,
+        username: Option<&str>,
+        folder: Option<&str>,
+        ignore_case: bool,
+    ) -> anyhow::Result<AttachmentTransferReport> {
+        let (ctx, db) = require_unlocked(account)?;
+        let acct = ctx.account_ref();
+        let Ok(needle) = parse_needle(query);
+        let desc = format!(
+            "{}{}",
+            username.map_or_else(String::new, |s| format!("{s}@")),
+            needle
+        );
+        let entry = find_attachment_entry(
+            acct,
+            &db,
+            needle,
+            username,
+            folder,
+            ignore_case,
+        )
+        .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+        let attachment_id = resolve_attachment_id(acct, &entry, attachment)?;
+        let bytes =
+            zeroize::Zeroizing::new(crate::actions::download_attachment(
+                acct,
+                &entry.id,
+                &attachment_id,
+            )?);
+        let written = bytes.len();
+        write_attachment(&bytes, output)?;
+
+        Ok(AttachmentTransferReport {
+            action: "download".to_string(),
+            entry_id: entry.id,
+            attachment_id,
+            file_name: None,
+            path: output.display().to_string(),
+            bytes: written,
+        })
+    }
+
+    pub fn upload_attachment(
+        account: Option<&str>,
+        query: &str,
+        file: &std::path::Path,
+        file_name: Option<&str>,
+        username: Option<&str>,
+        folder: Option<&str>,
+        ignore_case: bool,
+    ) -> anyhow::Result<AttachmentTransferReport> {
+        let (resolved_name, bytes) = read_upload_input(file, file_name)?;
+        let uploaded = bytes.len();
+        let (ctx, db) = require_unlocked(account)?;
+        let acct = ctx.account_ref();
+        let Ok(needle) = parse_needle(query);
+        let desc = format!(
+            "{}{}",
+            username.map_or_else(String::new, |s| format!("{s}@")),
+            needle
+        );
+        let entry = find_attachment_entry(
+            acct,
+            &db,
+            needle,
+            username,
+            folder,
+            ignore_case,
+        )
+        .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+        let attachment_id = crate::actions::upload_attachment(
+            acct,
+            &entry.id,
+            &resolved_name,
+            &bytes,
+        )?;
+        drop(bytes);
+        crate::actions::sync(acct)?;
+
+        Ok(AttachmentTransferReport {
+            action: "upload".to_string(),
+            entry_id: entry.id,
+            attachment_id,
+            file_name: Some(resolved_name),
+            path: file.display().to_string(),
+            bytes: uploaded,
+        })
+    }
 }
 
 #[cfg(test)]

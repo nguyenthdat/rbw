@@ -902,8 +902,16 @@ struct CiphersPostReq {
     login: Option<CipherLogin>,
     card: Option<CipherCard>,
     identity: Option<CipherIdentity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    fields: Vec<CipherField>,
     #[serde(rename = "secureNote")]
     secure_note: Option<CipherSecureNote>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct CreatedCipherRes {
+    #[serde(default, alias = "Id")]
+    id: Option<String>,
 }
 
 #[derive(serde::Serialize, Debug)]
@@ -1982,7 +1990,28 @@ impl Client {
         notes: Option<&str>,
         folder_id: Option<&str>,
     ) -> Result<()> {
-        let req = build_ciphers_post_req(name, data, notes, folder_id);
+        self.add_with_fields(
+            access_token,
+            name,
+            data,
+            &[],
+            notes,
+            folder_id,
+        )?;
+        Ok(())
+    }
+
+    pub fn add_with_fields(
+        &self,
+        access_token: &str,
+        name: &str,
+        data: &crate::db::EntryData,
+        fields: &[crate::db::Field],
+        notes: Option<&str>,
+        folder_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        let req =
+            build_ciphers_post_req(name, data, fields, notes, folder_id);
         let client = reqwest::blocking::Client::new();
         let res = client
             .post(self.api_url("/ciphers"))
@@ -1991,7 +2020,10 @@ impl Client {
             .send()
             .map_err(|source| Error::Reqwest { source })?;
         match res.status() {
-            reqwest::StatusCode::OK => Ok(()),
+            reqwest::StatusCode::OK => Ok(res
+                .json::<CreatedCipherRes>()
+                .ok()
+                .and_then(|created| created.id)),
             reqwest::StatusCode::UNAUTHORIZED => {
                 Err(Error::RequestUnauthorized)
             }
@@ -2493,6 +2525,7 @@ fn validate_blob_url(
 fn build_ciphers_post_req(
     name: &str,
     data: &crate::db::EntryData,
+    fields: &[crate::db::Field],
     notes: Option<&str>,
     folder_id: Option<&str>,
 ) -> CiphersPostReq {
@@ -2510,6 +2543,15 @@ fn build_ciphers_post_req(
         login: None,
         card: None,
         identity: None,
+        fields: fields
+            .iter()
+            .map(|field| CipherField {
+                ty: field.ty,
+                name: field.name.clone(),
+                value: field.value.clone(),
+                linked_id: field.linked_id,
+            })
+            .collect(),
         secure_note: None,
     };
     match data {
@@ -2811,6 +2853,7 @@ mod tests {
         let req = build_ciphers_post_req(
             "2.name|ct|mac",
             &crate::db::EntryData::SecureNote,
+            &[],
             Some("2.note|ct|mac"),
             Some("folder-1"),
         );
@@ -2821,6 +2864,24 @@ mod tests {
         assert_eq!(val["folderId"], "folder-1");
         assert_eq!(val["secureNote"]["type"], 0);
         assert!(val["login"].is_null());
+        assert!(val.get("fields").is_none());
+
+        let req_with_fields = build_ciphers_post_req(
+            "2.name|ct|mac",
+            &crate::db::EntryData::SecureNote,
+            &[crate::db::Field {
+                ty: Some(FieldType::Hidden),
+                name: Some("2.k|ct|mac".to_string()),
+                value: Some("2.v|ct|mac".to_string()),
+                linked_id: None,
+            }],
+            None,
+            None,
+        );
+        let val_fields = serde_json::to_value(&req_with_fields).unwrap();
+        assert_eq!(val_fields["fields"][0]["Type"], 1);
+        assert_eq!(val_fields["fields"][0]["Name"], "2.k|ct|mac");
+        assert_eq!(val_fields["fields"][0]["Value"], "2.v|ct|mac");
 
         let legacy_note: CipherSecureNote =
             serde_json::from_str("{}").unwrap();

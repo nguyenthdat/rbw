@@ -501,27 +501,58 @@ pub fn add(
     notes: Option<&str>,
     folder_id: Option<&str>,
 ) -> Result<(Option<String>, ())> {
+    let (token, _) = add_with_fields(
+        config,
+        access_token,
+        refresh_token,
+        name,
+        data,
+        &[],
+        notes,
+        folder_id,
+    )?;
+    Ok((token, ()))
+}
+
+pub fn add_with_fields(
+    config: &crate::config::Config,
+    access_token: &str,
+    refresh_token: &str,
+    name: &str,
+    data: &crate::db::EntryData,
+    fields: &[crate::db::Field],
+    notes: Option<&str>,
+    folder_id: Option<&str>,
+) -> Result<(Option<String>, Option<String>)> {
     with_exchange_refresh_token(
         config,
         access_token,
         refresh_token,
         |access_token| {
-            add_once(config, access_token, name, data, notes, folder_id)
+            add_with_fields_once(
+                config,
+                access_token,
+                name,
+                data,
+                fields,
+                notes,
+                folder_id,
+            )
         },
     )
 }
 
-fn add_once(
+fn add_with_fields_once(
     config: &crate::config::Config,
     access_token: &str,
     name: &str,
     data: &crate::db::EntryData,
+    fields: &[crate::db::Field],
     notes: Option<&str>,
     folder_id: Option<&str>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let client = api_client_for(config);
-    client.add(access_token, name, data, notes, folder_id)?;
-    Ok(())
+    client.add_with_fields(access_token, name, data, fields, notes, folder_id)
 }
 
 pub fn edit(

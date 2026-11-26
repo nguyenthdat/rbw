@@ -273,6 +273,70 @@ export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rbw/ssh-agent-socket"
 If you're using a profile, the socket will be located at
 `"XDG_RUNTIME_DIR/rbw-<profile>/ssh-agent-socket"`.
 
+### MCP Server (Model Context Protocol 2.0)
+
+`rbw` ships a local-only **MCP 2.0 (`2026-07-28`)** stdio server backed by
+`rbw-agent` (enabled by the default `mcp` Cargo feature). Unlike stateless
+CLI wrappers, it requires no `BW_SESSION` token in your MCP config, supports
+multi-account vaults, triggers local Touch ID / YubiKey / `pinentry`
+out-of-band on unlock, and exposes a compact, fully annotated toolset:
+
+* **Default (read-only — 5 tools):** `vault_status`, `vault_search` (metadata
+  only, never secrets), `vault_get` (defaults to `mode="summary"`; supports
+  `mode="field"`, `totp`, `history`, `full`, and `copy_to_clipboard: true` to
+  copy secrets without placing plaintext in the LLM context), `vault_generate`,
+  and `vault_session` (`unlock`, `lock`, `sync`, `switch_account`).
+* **Write & delete (`--allow-write` or `RBW_MCP_ALLOW_WRITE=1` — +2 tools):**
+  `vault_write` (`create_item`, `update_item`, `create_folder`) and
+  `vault_delete` (`item`, `attachment`, marked `destructiveHint: true`).
+* **Attachments (`--allowed-dir <DIR>` or `RBW_MCP_ALLOWED_DIRS` — +1 tool):**
+  `vault_attachment` (`download` atomically with `0600` no-clobber; `upload`
+  also requires `--allow-write`).
+
+Example MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "rbw": {
+      "command": "rbw",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+To enable writes and attachment transfers inside a dedicated directory:
+
+```json
+{
+  "mcpServers": {
+    "rbw": {
+      "command": "rbw",
+      "args": ["mcp", "--allow-write", "--allowed-dir", "/tmp/rbw-attachments"]
+    }
+  }
+}
+```
+
+#### Bundled Agent Skill
+
+`rbw` bundles an Agent Skill (`skills/rbw/`) in two ways:
+
+1. **MCP 2.0 SEP-2640 (`io.modelcontextprotocol/skills`):** `rbw mcp` serves
+   `skill://rbw/SKILL.md` and its references natively over `skills/list`,
+   `skills/get`, `resources/list`, `resources/read`, and
+   `resources/directory/read` with SHA-256 integrity digests.
+2. **Local installation for agent runtimes (`agy`, `omp`, Claude Code, cross-agent):**
+
+```sh
+rbw mcp install-skill --target agents   # ~/.agents/skills/rbw (default)
+rbw mcp install-skill --target agy      # ~/.gemini/config/skills/rbw
+rbw mcp install-skill --target omp      # ~/.omp/agent/skills/rbw
+rbw mcp install-skill --target claude   # ~/.claude/skills/rbw
+rbw mcp install-skill --target all --force
+```
+
 ### 2FA and Passkey support
 
 `rbw` supports the following 2FA mechanisms:

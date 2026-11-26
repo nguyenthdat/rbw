@@ -1,3 +1,5 @@
+#![allow(clippy::large_unopt_stack_frames)]
+
 use std::io::Write as _;
 
 use anyhow::Context as _;
@@ -5,6 +7,8 @@ use clap::{CommandFactory as _, Parser as _};
 
 mod actions;
 mod commands;
+#[cfg(feature = "mcp")]
+mod mcp;
 mod prompt;
 mod sock;
 
@@ -353,6 +357,33 @@ enum Opt {
         about = "Generate completion script for the given shell"
     )]
     GenCompletions { shell: CompletionShell },
+
+    #[cfg(feature = "mcp")]
+    #[command(
+        about = "Run the local MCP 2.0 server (stdio) or install its bundled agent skill"
+    )]
+    Mcp {
+        #[arg(
+            long,
+            help = "Enable write and delete tools (vault_write, vault_delete, attachment upload) [env: RBW_MCP_ALLOW_WRITE]"
+        )]
+        allow_write: bool,
+        #[arg(
+            long = "allowed-dir",
+            value_name = "DIR",
+            help = "Allow attachment download/upload inside this directory (repeatable) [env: RBW_MCP_ALLOWED_DIRS]"
+        )]
+        allowed_dirs: Vec<std::path::PathBuf>,
+        #[arg(
+            long,
+            default_value_t = 60,
+            value_name = "SECS",
+            help = "Timeout in seconds for out-of-band unlock via vault_session"
+        )]
+        unlock_timeout: u64,
+        #[command(subcommand)]
+        action: Option<McpAction>,
+    },
 }
 
 impl Opt {
@@ -389,6 +420,48 @@ impl Opt {
             Self::Purge => "purge".to_string(),
             Self::StopAgent => "stop-agent".to_string(),
             Self::GenCompletions { .. } => "gen-completions".to_string(),
+            #[cfg(feature = "mcp")]
+            Self::Mcp { action, .. } => action.as_ref().map_or_else(
+                || "mcp".to_string(),
+                |action| format!("mcp {}", action.subcommand_name()),
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "mcp")]
+#[derive(Debug, clap::Subcommand)]
+enum McpAction {
+    #[command(
+        name = "install-skill",
+        about = "Install the bundled rbw Agent Skill to local agent directories"
+    )]
+    InstallSkill {
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = mcp::SkillTarget::Agents,
+            conflicts_with = "dir",
+            help = "Target agent runtime (agents, agy, omp, claude, all)"
+        )]
+        target: mcp::SkillTarget,
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "target",
+            help = "Install skill files directly into this directory"
+        )]
+        dir: Option<std::path::PathBuf>,
+        #[arg(long, help = "Overwrite existing skill files")]
+        force: bool,
+    },
+}
+
+#[cfg(feature = "mcp")]
+impl McpAction {
+    fn subcommand_name(&self) -> &'static str {
+        match self {
+            Self::InstallSkill { .. } => "install-skill",
         }
     }
 }
@@ -1038,6 +1111,41 @@ fn main() {
             }
             Ok(())
         }
+        #[cfg(feature = "mcp")]
+        Opt::Mcp {
+            allow_write,
+            mut allowed_dirs,
+            unlock_timeout,
+            action,
+        } => match action {
+            Some(McpAction::InstallSkill { target, dir, force }) => {
+                mcp::install_skill(target, dir.as_deref(), force)
+            }
+            None => {
+                let env_allow_write = std::env::var("RBW_MCP_ALLOW_WRITE")
+                    .is_ok_and(|v| {
+                        matches!(
+                            v.trim().to_ascii_lowercase().as_str(),
+                            "1" | "true" | "yes"
+                        )
+                    });
+                if let Ok(env_dirs) = std::env::var("RBW_MCP_ALLOWED_DIRS") {
+                    for part in env_dirs.split(',') {
+                        let trimmed = part.trim();
+                        if !trimmed.is_empty() {
+                            allowed_dirs
+                                .push(std::path::PathBuf::from(trimmed));
+                        }
+                    }
+                }
+                mcp::serve(mcp::McpServeOpts {
+                    account: account.map(str::to_string),
+                    allow_write: allow_write || env_allow_write,
+                    allowed_dirs,
+                    unlock_timeout_secs: unlock_timeout,
+                })
+            }
+        },
     }
     .with_context(|| format!("rbw {subcommand_name}"));
 
@@ -1326,5 +1434,78 @@ mod tests {
             ])
             .is_ok()
         );
+
+        #[cfg(feature = "mcp")]
+        {
+            let cli = Cli::try_parse_from(["rbw", "mcp"]).unwrap();
+            assert!(matches!(
+                cli.command,
+                Opt::Mcp {
+                    allow_write: false,
+                    ref allowed_dirs,
+                    unlock_timeout: 60,
+                    action: None,
+                } if allowed_dirs.is_empty()
+            ));
+
+            let cli = Cli::try_parse_from([
+                "rbw",
+                "-a",
+                "work",
+                "mcp",
+                "--allow-write",
+                "--allowed-dir",
+                "/tmp/a",
+                "--allowed-dir",
+                "/tmp/b",
+                "--unlock-timeout",
+                "90",
+            ])
+            .unwrap();
+            assert_eq!(cli.account.as_deref(), Some("work"));
+            assert!(matches!(
+                cli.command,
+                Opt::Mcp {
+                    allow_write: true,
+                    ref allowed_dirs,
+                    unlock_timeout: 90,
+                    action: None,
+                } if allowed_dirs.len() == 2
+            ));
+
+            let cli = Cli::try_parse_from([
+                "rbw",
+                "mcp",
+                "install-skill",
+                "--target",
+                "agy",
+                "--force",
+            ])
+            .unwrap();
+            assert!(matches!(
+                cli.command,
+                Opt::Mcp {
+                    action: Some(McpAction::InstallSkill {
+                        target: mcp::SkillTarget::Agy,
+                        dir: None,
+                        force: true,
+                    }),
+                    ..
+                }
+            ));
+
+            assert!(
+                Cli::try_parse_from([
+                    "rbw",
+                    "mcp",
+                    "install-skill",
+                    "--target",
+                    "omp",
+                    "--dir",
+                    "/tmp/custom",
+                ])
+                .is_err()
+            );
+        }
     }
 }

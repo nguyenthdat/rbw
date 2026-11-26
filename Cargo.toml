@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["bitwarden"]
 categories = ["command-line-utilities", "cryptography"]
 license = "MIT"
-include = ["src/**/*", "bin/**/*", "LICENSE", "README.md", "CHANGELOG.md"]
+include = ["src/**/*", "bin/**/*", "skills/**/*", "LICENSE", "README.md", "CHANGELOG.md"]
 
 [dependencies]
 aes = "0.9.4"
@@ -86,6 +86,13 @@ zeroize = "1.9.2"
 arboard = { version = "3.7.0", default-features = false, features = [
     "wayland-data-control",
 ], optional = true }
+rmcp = { version = "3.11.0", default-features = false, features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-io",
+], optional = true }
+schemars = { version = "1.0", optional = true }
 
 [target.'cfg(all(not(target_env = "musl"), not(target_os = "android")))'.dependencies]
 ctap-hid-fido2 = { version = "3.6.1", optional = true }
@@ -107,9 +114,10 @@ objc2-local-authentication = { version = "0.3.2", default-features = false, feat
 security-framework = "3.7.0"
 
 [features]
-default = ["clipboard", "fido2"]
+default = ["clipboard", "fido2", "mcp"]
 clipboard = ["arboard"]
 fido2 = ["dep:ctap-hid-fido2"]
+mcp = ["dep:rmcp", "dep:schemars"]
 
 [lints.clippy]
 cargo = { level = "warn", priority = -1 }
@@ -165,6 +173,21 @@ assets = [
     [
         "README.md",
         "usr/share/doc/rbw/README",
+        "644",
+    ],
+    [
+        "skills/rbw/SKILL.md",
+        "usr/share/doc/rbw/skills/rbw/",
+        "644",
+    ],
+    [
+        "skills/rbw/references/tools.md",
+        "usr/share/doc/rbw/skills/rbw/references/",
+        "644",
+    ],
+    [
+        "skills/rbw/references/workflows.md",
+        "usr/share/doc/rbw/skills/rbw/references/",
         "644",
     ],
 ]
