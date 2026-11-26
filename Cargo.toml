@@ -1,151 +1,28 @@
 [package]
 name = "rbw"
-version = "1.15.0"
-authors = ["Jesse Luehrs <doy@tozt.net>"]
+version = "1.16.0"
+authors = [
+    "Jesse Luehrs <doy@tozt.net>",
+    "Dat Nguyen <dat.nguyen@bitbytelab.io>",
+]
 edition = "2024"
 rust-version = "1.100.0"
 
-description = "Unofficial Bitwarden CLI"
-repository = "https://github.com/doy/rbw"
+description = "Unofficial Bitwarden CLI with multi-account, Touch ID, FIDO2/YubiKey, SSH agent, and MCP 2.0 server"
+repository = "https://github.com/nguyenthdat/rbw"
 readme = "README.md"
-keywords = ["bitwarden"]
+keywords = ["bitwarden", "password-manager", "cli", "mcp", "fido2"]
 categories = ["command-line-utilities", "cryptography"]
 license = "MIT"
-include = ["build.rs", "src/**/*", "bin/**/*", "skills/**/*", "LICENSE", "README.md", "CHANGELOG.md"]
-
-[dependencies]
-aes = "0.9.4"
-anyhow = "1.0.105"
-argon2 = "0.6.0"
-arrayvec = "0.7.8"
-axum = "0.8.9"
-base32 = "0.5.1"
-base64 = "0.23.1"
-block-padding = "0.4.2"
-cbc = { version = "0.2.1", features = ["alloc"] }
-clap_complete = "4.6.12"
-clap = { version = "4.6.10", features = ["wrap_help", "derive"] }
-clap_complete_nushell = "4.6.3"
-clap_complete_fig = "4.5.2"
-daemonize = "0.5.0"
-directories = "6.0.0"
-env_logger = "0.11.12"
-futures = "0.3.34"
-futures-channel = "0.3.34"
-futures-util = "0.3.34"
-hkdf = "0.13.0"
-hmac = "0.13.0"
-humantime = "2.4.0"
-is-terminal = "0.4.17"
-libc = "0.2.191"
-log = "0.4.35"
-open = "5.4.5"
-pbkdf2 = "0.13.0"
-percent-encoding = "2.3.2"
-pkcs8 = "0.11.0"
-rand = "0.10.4"
-regex = "1.13.2"
-region = "4.0.2"
-reqwest = { version = "0.13.5", default-features = false, features = [
-    "blocking",
-    "form",
-    "json",
-    "rustls",
-] }
-rmpv = "1.3.1"
-rsa = { version = "0.10.0", features = ["pkcs1v15"] }
-rustix = { version = "1.1.6", features = [
-    "termios",
-    "process",
-    "pipe",
-] }
-serde_json = "1.0.154"
-serde_path_to_error = "0.1.20"
-serde_repr = "0.1.21"
-serde = { version = "1.0.229", features = ["derive"] }
-sha1 = "0.11.0"
-sha2 = "0.11.2"
-signature = "3.0.0"
-ssh-agent-lib = "0.6.0"
-tempfile = "3.27.0"
-terminal_size = "0.4.4"
-textwrap = "0.16.4"
-thiserror = "2.0.21"
-tokio-stream = { version = "0.1.19", features = ["net"] }
-tokio-tungstenite = { version = "0.30", features = [
-    "rustls-tls-native-roots",
-    "url",
-] }
-tokio = { version = "1.54.1", features = ["full"] }
-totp-rs = { version = "6.0.0", features = ["steam"] }
-url = "2.5.9"
-urlencoding = "2.1.3"
-uuid = { version = "1.29.3", features = ["v4"] }
-zeroize = "1.9.2"
-
-arboard = { version = "3.7.0", default-features = false, features = [
-    "wayland-data-control",
-], optional = true }
-flate2 = { version = "1.1", default-features = false, features = [
-    "rust_backend",
-], optional = true }
-rmcp = { version = "3.11.0", default-features = false, features = [
-    "server",
-    "macros",
-    "schemars",
-    "transport-io",
-], optional = true }
-schemars = { version = "1.0", optional = true }
-semver = { version = "1.0", optional = true }
-tar = { version = "0.4", default-features = false, optional = true }
-
-[target.'cfg(all(not(target_env = "musl"), not(target_os = "android")))'.dependencies]
-ctap-hid-fido2 = { version = "3.6.1", optional = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-block2 = "0.6.2"
-objc2 = "0.6.5"
-objc2-foundation = { version = "0.3.2", default-features = false, features = [
-    "NSError",
-    "NSString",
-    "std",
-] }
-objc2-local-authentication = { version = "0.3.2", default-features = false, features = [
-    "LAContext",
-    "LAError",
-    "block2",
-    "std",
-] }
-security-framework = "3.7.0"
-
-[features]
-default = ["clipboard", "fido2", "mcp", "self-update"]
-clipboard = ["arboard"]
-fido2 = ["dep:ctap-hid-fido2"]
-mcp = ["dep:rmcp", "dep:schemars"]
-self-update = ["dep:flate2", "dep:semver", "dep:tar"]
-
-[lints.clippy]
-cargo = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-as_conversions = "warn"
-get_unwrap = "warn"
-cognitive_complexity = "allow"
-missing_const_for_fn = "allow"
-similar_names = "allow"
-struct_excessive_bools = "allow"
-fn_params_excessive_bools = "allow"
-too_many_arguments = "allow"
-too_many_lines = "allow"
-type_complexity = "allow"
-multiple_crate_versions = "allow"
-large_enum_variant = "allow"
-must_use_candidate = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-significant_drop_tightening = "allow"
-struct_field_names = "allow"
+include = [
+    "build.rs",
+    "src/**/*",
+    "bin/**/*",
+    "skills/**/*",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+]
 
 [package.metadata.deb]
 depends = "pinentry"
@@ -197,3 +74,137 @@ assets = [
         "644",
     ],
 ]
+
+[features]
+default = ["clipboard", "fido2", "mcp", "self-update"]
+clipboard = ["arboard"]
+fido2 = ["dep:ctap-hid-fido2"]
+mcp = ["dep:rmcp", "dep:schemars"]
+self-update = ["dep:flate2", "dep:semver", "dep:tar"]
+
+[dependencies]
+aes = "0.9.4"
+anyhow = "1.0.105"
+argon2 = "0.6.0"
+arrayvec = "0.7.8"
+axum = "0.8.9"
+base32 = "0.5.1"
+base64 = "0.23.1"
+block-padding = "0.4.2"
+cbc = { version = "0.2.1", features = ["alloc"] }
+clap = { version = "4.6.10", features = ["wrap_help", "derive"] }
+clap_complete = "4.6.12"
+clap_complete_fig = "4.5.2"
+clap_complete_nushell = "4.6.3"
+daemonize = "0.5.0"
+directories = "6.0.0"
+env_logger = "0.11.12"
+futures = "0.3.34"
+futures-channel = "0.3.34"
+futures-util = "0.3.34"
+hkdf = "0.13.0"
+hmac = "0.13.0"
+humantime = "2.4.0"
+is-terminal = "0.4.17"
+libc = "0.2.191"
+log = "0.4.35"
+open = "5.4.5"
+pbkdf2 = "0.13.0"
+percent-encoding = "2.3.2"
+pkcs8 = "0.11.0"
+rand = "0.10.4"
+regex = "1.13.2"
+region = "4.0.2"
+reqwest = { version = "0.13.5", default-features = false, features = [
+    "blocking",
+    "form",
+    "json",
+    "rustls",
+] }
+rmpv = "1.3.1"
+rsa = { version = "0.10.0", features = ["pkcs1v15"] }
+rustix = { version = "1.1.6", features = [
+    "termios",
+    "process",
+    "pipe",
+] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+serde_path_to_error = "0.1.20"
+serde_repr = "0.1.21"
+sha1 = "0.11.0"
+sha2 = "0.11.2"
+signature = "3.0.0"
+ssh-agent-lib = "0.6.0"
+tempfile = "3.27.0"
+terminal_size = "0.4.4"
+textwrap = "0.16.4"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-stream = { version = "0.1.19", features = ["net"] }
+tokio-tungstenite = { version = "0.30", features = [
+    "rustls-tls-native-roots",
+    "url",
+] }
+totp-rs = { version = "6.0.0", features = ["steam"] }
+url = "2.5.9"
+urlencoding = "2.1.3"
+uuid = { version = "1.29.3", features = ["v4"] }
+zeroize = "1.9.2"
+
+arboard = { version = "3.7.0", default-features = false, features = [
+    "wayland-data-control",
+], optional = true }
+flate2 = { version = "1.1", default-features = false, features = [
+    "rust_backend",
+], optional = true }
+rmcp = { version = "3.11.0", default-features = false, features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-io",
+], optional = true }
+schemars = { version = "1.0", optional = true }
+semver = { version = "1.0", optional = true }
+tar = { version = "0.4", default-features = false, optional = true }
+
+[target.'cfg(all(not(target_env = "musl"), not(target_os = "android")))'.dependencies]
+ctap-hid-fido2 = { version = "3.6.1", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "NSError",
+    "NSString",
+    "std",
+] }
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = [
+    "LAContext",
+    "LAError",
+    "block2",
+    "std",
+] }
+security-framework = "3.7.0"
+
+[lints.clippy]
+cargo = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+as_conversions = "warn"
+get_unwrap = "warn"
+cognitive_complexity = "allow"
+missing_const_for_fn = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+too_many_arguments = "allow"
+too_many_lines = "allow"
+type_complexity = "allow"
+multiple_crate_versions = "allow"
+large_enum_variant = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+significant_drop_tightening = "allow"
+struct_field_names = "allow"

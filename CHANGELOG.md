@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.16.0] - 2026-11-26
+
+### Added
+
+* **Multi-account & multi-server vault support** (`rbw account add|list|switch|current|rename|remove`, `rbw switch`, `-a/--account`, `RBW_ACCOUNT`, `rbw lock --all`, and per-account config overrides) inside a single `rbw-agent`.
+* **macOS Touch ID local vault unlock** (`touchid` config option) storing only the derived master key in the macOS login keychain.
+* **FIDO2 / YubiKey local unlock and passwordless passkey login** (`rbw yubikey enroll|list|remove|clear`, `rbw login --passkey`, CTAP2 `hmac-secret` and WebAuthn PRF).
+* **Attachment management** (`rbw attachment list|upload|download|remove` and `rbw get --attachment ... --output ...`) supporting both Bitwarden Cloud Azure SAS and self-hosted Vaultwarden Direct uploads with atomic `0600` no-clobber downloads.
+* **Password history & Secure Notes** (`rbw history` with `--version`/`--raw`/`--clipboard`, and `rbw add --note` / `--type note` supporting `$EDITOR` or piped stdin).
+* **Local MCP 2.0 (`2026-07-28`) server & bundled Agent Skill** (`rbw mcp`, `rbw mcp install-skill`) backed by `rbw-agent` with SEP-2640 skills/resources, clipboard-only secret delivery, opt-in writes (`--allow-write`), and allowlisted attachment directories (`--allowed-dir`).
+* **Self-update CLI & standalone installer**: `rbw self update` (alias `rbw self-update`) with SHA-256 verification and atomic binary swap, POSIX `install.sh` (`curl -LsSf ... | sh`), and multi-platform GitHub Releases workflow (macOS arm64/x64, Linux x64/arm64 gnu & musl, `amd64` `.deb`).
+
+### Changed
+
+* Upgraded dependencies and migrated to Rust 2024 edition (`rust-version = "1.100.0"`).
+
+### Fixed
+
+* Unlocked `mlock` memory before freeing allocations in `rbw::locked`.
+* Scoped `cargo doc` CI to `--no-deps` and resolved stable/nightly Clippy and musl/Android CI compatibility issues.
+
 ## [1.15.0] - 2025-12-31
 
 ## Added

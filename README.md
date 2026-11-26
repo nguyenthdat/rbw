@@ -1,55 +1,93 @@
-# rbw
+<p align="center">
+  <img src="docs/assets/banner.png" alt="rbw — Unofficial Bitwarden CLI" width="100%" />
+</p>
 
-This is an unofficial command line client for
-[Bitwarden](https://bitwarden.com/). Although Bitwarden does come with its own
-[command line client](https://help.bitwarden.com/article/cli/), it is
-limited by being stateless - to use it, you're required to manually lock and
-unlock the client, and pass the temporary keys around in environment variables,
-which makes it very difficult to use. `rbw` avoids this problem by
-maintaining a background process which is able to hold the keys in memory,
-similar to the way that `ssh-agent` or `gpg-agent` work. This allows the client
-to be used in a much simpler way, with the background agent taking care of
-maintaining the necessary state.
+<p align="center">
+  <strong>Unofficial Bitwarden &amp; Vaultwarden CLI in Rust</strong><br />
+  Persistent background agent · Multi-account vaults · Touch ID &amp; FIDO2/YubiKey · SSH agent · Local MCP 2.0 server
+</p>
 
-## Maintenance
+<p align="center">
+  <a href="https://github.com/nguyenthdat/rbw/actions/workflows/tests.yaml"><img src="https://github.com/nguyenthdat/rbw/actions/workflows/tests.yaml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/nguyenthdat/rbw/releases"><img src="https://img.shields.io/github/v/release/nguyenthdat/rbw?include_prereleases&amp;color=175ddc" alt="Release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+  <img src="https://img.shields.io/badge/rust-1.100%2B-orange.svg" alt="Rust 1.100+" />
+  <img src="https://img.shields.io/badge/MCP-2.0%20(2026--07--28)-175ddc.svg" alt="MCP 2.0" />
+</p>
 
-I consider `rbw` to be essentially feature-complete for me at this point. While
-I still use it on a daily basis, and will continue to fix regressions as they
-occur, I am unlikely to spend time implementing new features on my own. If you
-would like to see new functionality in `rbw`, I am more than happy to review
-and merge pull requests implementing those features.
+<p align="center">
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#installation">Installation</a> ·
+  <a href="#multiple-accounts--profiles">Multi-Account</a> ·
+  <a href="#biometrics-fido2--passkeys">Touch ID &amp; FIDO2</a> ·
+  <a href="#mcp-server-model-context-protocol-20">MCP 2.0 Server</a> ·
+  <a href="#configuration">Configuration</a>
+</p>
+
+---
+
+Unlike the official stateless Bitwarden CLI (which requires manually unlocking and passing `BW_SESSION` environment variables around), `rbw` runs a lightweight background daemon (`rbw-agent`) that keeps decrypted keys in locked memory (`mlock`), similar to `ssh-agent` or `gpg-agent`.
+
+## Highlights
+
+| Capability | Details |
+| :--- | :--- |
+| **Persistent Agent** | Automatic login, unlock, timeout locking, and background WebSocket sync via `rbw-agent`. |
+| **Multi-Account & Profiles** | Manage multiple Bitwarden Cloud (`.com` / `.eu`) and self-hosted Vaultwarden accounts in one agent (`rbw switch`, `-a/--account`, `RBW_ACCOUNT`), plus isolated `RBW_PROFILE` environments. |
+| **Touch ID & FIDO2 / Passkeys** | Local vault unlock via macOS Touch ID / Apple Watch or CTAP2 `hmac-secret` YubiKeys, plus passwordless WebAuthn PRF passkey login (`rbw login --passkey`). |
+| **Complete Vault Operations** | Logins, TOTP / Steam Guard, Secure Notes, Password History (`rbw history`), encrypted File Attachments (Bitwarden Cloud Azure SAS &amp; Vaultwarden Direct), and Diceware/password generation. |
+| **Built-in SSH Agent** | Serve SSH key vault entries directly over `$XDG_RUNTIME_DIR/rbw/ssh-agent-socket` for the active account. |
+| **Local MCP 2.0 Server** | Zero-token stdio MCP 2.0 (`2026-07-28`) server (`rbw mcp`) with clipboard-only secret delivery, opt-in writes, allowlisted attachment transfers, and a bundled SEP-2640 Agent Skill. |
+| **Standalone Installer & Self-Update** | One-line POSIX `curl` installer and atomic `rbw self update` with mandatory SHA-256 verification. |
+
+## Quick Start
+
+```sh
+# 1. Install prebuilt rbw + rbw-agent (macOS & Linux)
+curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | sh
+
+# 2. Configure an account (interactive wizard for bitwarden.com, bitwarden.eu, or self-hosted)
+rbw account add
+
+# 3. Retrieve passwords or TOTP codes (unlocks automatically via Touch ID / YubiKey / pinentry)
+rbw get github --clipboard
+rbw code github
+
+# 4. Upgrade anytime from GitHub Releases
+rbw self update
+```
+
+> [!NOTE]
+> **Official Bitwarden server (`bitwarden.com`) users:** Bitwarden Cloud may flag initial CLI password logins as bot traffic (see [bitwarden/cli#383](https://github.com/bitwarden/cli/issues/383)). Run `rbw register` once per device using your [personal API key](https://bitwarden.com/help/article/personal-api-key/) before regular logins.
 
 ## Installation
 
 ### Standalone Installer (macOS & Linux)
 
-Install prebuilt `rbw` and `rbw-agent` binaries (with SHA-256 verification) via
-`curl` or `wget`:
+Install prebuilt `rbw` and `rbw-agent` binaries (with SHA-256 checksum verification) via `curl` or `wget`:
 
 ```sh
 curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | sh
 ```
 
-Install a specific version or customize the install path:
+Install a pinned version or customize the target directory:
 
 ```sh
-# Install a pinned release
-curl -LsSf https://github.com/nguyenthdat/rbw/releases/download/v1.15.0/install.sh | sh
-# Or via flags / environment variables
-curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | sh -s -- --version 1.15.0 --install-dir ~/.local/bin
+# Install a specific release tag
+curl -LsSf https://github.com/nguyenthdat/rbw/releases/download/v1.16.0/install.sh | sh
+
+# Or pass flags / environment variables
+curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | sh -s -- --version 1.16.0 --install-dir ~/.local/bin
 curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | RBW_NO_MODIFY_PATH=1 sh
 ```
 
-On macOS, Apple Silicon (`aarch64`) and Intel (`x86_64`) are supported (including
-automatic Rosetta 2 detection). On Linux (`x86_64` and `aarch64`), the installer
-selects `gnu` (with native FIDO2/YubiKey support) when `glibc >= 2.39`, and
-automatically falls back to static `musl` binaries on Alpine or older glibc
-systems (`RBW_INSTALL_LIBC=musl` or `gnu` overrides this).
+- **macOS:** Supports Apple Silicon (`aarch64-apple-darwin`) and Intel (`x86_64-apple-darwin`) with automatic Rosetta 2 detection.
+- **Linux:** Supports `x86_64` and `aarch64`. Automatically selects `gnu` (with native FIDO2/YubiKey support) when `glibc >= 2.39`, and falls back to static `musl` binaries on Alpine or older glibc systems (`RBW_INSTALL_LIBC=musl|gnu` overrides this).
+- **Requirement:** Install [`pinentry`](https://www.gnupg.org/related_software/pinentry/index.en.html) (e.g. `brew install pinentry-mac` on macOS or `sudo apt install pinentry-curses` on Debian/Ubuntu) for master password prompts.
 
-#### Self-Update
+### Self-Update
 
-Update an existing standalone installation directly from GitHub Releases (with
-SHA-256 verification and atomic replacement of both `rbw` and `rbw-agent`):
+Upgrade an existing standalone installation directly from GitHub Releases (verifies SHA-256, smoke-tests the staged binary, stops any running `rbw-agent`, and atomically swaps both `rbw` and `rbw-agent`):
 
 ```sh
 rbw self update                  # Update to the latest release (alias: rbw self-update)
@@ -58,122 +96,44 @@ rbw self update --version 1.16.0 # Install a specific version
 rbw self update --force          # Reinstall even if already up to date
 ```
 
-### Arch Linux
-
-`rbw` is available in the [extra
-repository](https://archlinux.org/packages/extra/x86_64/rbw/).
-Alternatively, you can install
-[`rbw-git`](https://aur.archlinux.org/packages/rbw-git/) from the AUR, which
-will always build from the latest master commit.
-
-### Debian/Ubuntu
-
-`rbw` is officially packaged for Debian as
-[`rust-rbw`](https://tracker.debian.org/pkg/rust-rbw) and is available in
-testing (forky). You can install it using `sudo apt install rbw`.
-
-Alternatively, you can download a Debian package from
-[https://git.tozt.net/rbw/releases/deb/
-](https://git.tozt.net/rbw/releases/deb/). The packages are signed by
-[`minisign`](https://github.com/jedisct1/minisign), and can be verified using
-the public key `RWTM0AZ5RpROOfAIWx1HvYQ6pw1+FKwN6526UFTKNImP/Hz3ynCFst3r`.
-
-### Fedora/EPEL
-
-`rbw` is available in [Fedora and EPEL 9](https://bodhi.fedoraproject.org/updates/?packages=rust-rbw)
-(for RHEL and compatible distributions).
-
-You can install it using `sudo dnf install rbw`.
-
-### Homebrew
-
-`rbw` is available in the [Homebrew repository](https://formulae.brew.sh/formula/rbw). You can install it via `brew install rbw`.
-
-### Nix
-
-`rbw` is available in the
-[NixOS repository](https://search.nixos.org/packages?show=rbw). You can try
-it out via `nix-shell -p rbw`.
-
-### Alpine
-
-`rbw` is available in the [community repository](https://pkgs.alpinelinux.org/packages?name=rbw). You can install it with `apk add rbw`.
-
-### Other
-
-With a working Rust installation, `rbw` can be installed via `cargo install
---locked rbw`. This requires that the
-[`pinentry`](https://www.gnupg.org/related_software/pinentry/index.en.html)
-program is installed (to display password prompts).
-
-## Configuration
-
-Configuration options are set using the `rbw config` command. Available
-configuration options:
-
-* `email`: The email address to use as the account name when logging into the
-  Bitwarden server. Required.
-* `sso_id`: The SSO organization ID. Defaults to regular login process if unset.
-* `base_url`: The URL of the Bitwarden server to use. Defaults to the official
-  server at `https://api.bitwarden.com/` if unset.
-* `identity_url`: The URL of the Bitwarden identity server to use. If unset,
-  will use the `/identity` path on the configured `base_url`, or
-  `https://identity.bitwarden.com/` if no `base_url` is set.
-* `ui_url`: The URL of the Bitwarden UI to use. If unset,
-  will default to `https://vault.bitwarden.com/`.
-* `notifications_url`: The URL of the Bitwarden notifications server to use.
-  If unset, will use the `/notifications` path on the configured `base_url`,
-  or `https://notifications.bitwarden.com/` if no `base_url` is set.
-* `lock_timeout`: The number of seconds to keep the master keys in memory for
-  before requiring the password to be entered again. Defaults to `3600` (one
-  hour).
-* `sync_interval`: `rbw` will automatically sync the database from the server
-  at an interval of this many seconds, while the agent is running. Setting
-  this value to `0` disables this behavior. Defaults to `3600` (one hour).
-* `pinentry`: The
-  [pinentry](https://www.gnupg.org/related_software/pinentry/index.html)
-  executable to use. Defaults to `pinentry`.
-* `touchid` *(macOS only)*: Whether to unlock the local vault with macOS
-  Touch ID (or Apple Watch) instead of prompting for the master password
-  after logging in. Stores the derived 64-byte master key (never the master
-  password) in the macOS login keychain, automatically falls back to
-  `pinentry` when unavailable or when "Use Master Password" is selected, and
-  removes the stored key when disabled or on `rbw purge`. Entries marked with
-  master password re-prompt still require the master password. Defaults to
-  `false`.
-* `yubikey`: Whether to unlock the local vault using a FIDO2 security key
-  (e.g. YubiKey 5, YubiKey Bio, Security Key NFC/C) via the CTAP2 `hmac-secret`
-  extension. Wraps the derived 64-byte master key using a key derived from the
-  security key and stores only the ciphertext in `data_dir` (`0o600`), falls
-  back to Touch ID / `pinentry` when no matching key is plugged in, and removes
-  stored keys when disabled or on `rbw purge`. Use `rbw yubikey enroll`,
-  `rbw yubikey list`, `rbw yubikey remove`, and `rbw yubikey clear` to manage
-  primary and backup keys. Entries marked with master password re-prompt still
-  require the master password. Defaults to `false`.
-* `yubikey_uv`: Whether local FIDO2 `hmac-secret` unlock requires User
-  Verification (FIDO2 PIN or biometric sensor) in addition to touching the
-  security key. Defaults to `false` (touch-only, unless the key enforces
-  `alwaysUv`).
-* `passkey_login`: Whether `rbw login` defaults to passwordless passkey login
-  (WebAuthn PRF) instead of master password login. Can always be overridden per
-  command with `rbw login --passkey` or `rbw login --password`. Defaults to
-  `false`.
-
-### Multiple Accounts & Vault Servers
-
-`rbw` supports managing and switching between multiple Bitwarden / Vaultwarden
-accounts (including the same email address across different vault servers)
-within a single `rbw-agent` daemon:
+### Build from Source / Other Packages
 
 ```sh
-# Interactive wizard to add an account (supports bitwarden.com, bitwarden.eu, or self-hosted URLs)
+# Build this fork from source (Rust 1.100+)
+cargo install --locked --git https://github.com/nguyenthdat/rbw.git
+```
+
+<details>
+<summary>Debian (.deb) &amp; Upstream Distribution Packages (<code>doy/rbw</code>)</summary>
+
+Prebuilt `amd64` `.deb` packages for this fork are attached to each [GitHub Release](https://github.com/nguyenthdat/rbw/releases).
+
+Upstream [`doy/rbw`](https://github.com/doy/rbw) is also packaged in system repositories (note: upstream distro packages may not include fork-specific features such as Touch ID, FIDO2/YubiKey, multi-account, attachments, or MCP 2.0):
+
+| Platform | Command |
+| :--- | :--- |
+| Arch Linux | `pacman -S rbw` ([extra](https://archlinux.org/packages/extra/x86_64/rbw/)) or `rbw-git` (AUR) |
+| Debian / Ubuntu | `sudo apt install rbw` (testing/forky) or `.deb` from [releases](https://github.com/nguyenthdat/rbw/releases) |
+| Fedora / EPEL 9 | `sudo dnf install rbw` |
+| Homebrew | `brew install rbw` |
+| Nix | `nix-shell -p rbw` |
+| Alpine | `apk add rbw` |
+
+</details>
+
+## Multiple Accounts & Profiles
+
+Manage and switch between multiple Bitwarden / Vaultwarden accounts (including the same email across different vault servers) inside a single `rbw-agent`:
+
+```sh
+# Interactive wizard (supports bitwarden.com, bitwarden.eu, or self-hosted URLs)
 rbw account add
 
-# Or add non-interactively
-rbw account add nullbyte --email user@example.com --server https://vault.example.com
+# Non-interactive account setup
+rbw account add work --email user@example.com --server https://vault.example.com
 rbw account add personal --email user@example.com --server bitwarden.com --login
 
-# List configured accounts and their live lock state (aliases: ls, status)
+# List configured accounts and live lock status (aliases: ls, status)
 rbw account list
 
 # Switch active account interactively (arrow-key picker) or directly
@@ -181,72 +141,44 @@ rbw switch
 rbw switch personal
 rbw account switch --email user@example.com --server bitwarden.com
 
-# Run a single command against another account without changing the active account
-rbw -a nullbyte ls
+# Run a single command against another account without switching
+rbw -a work ls
 RBW_ACCOUNT=personal rbw get github
 
-# Lock only the active account, or lock every account at once
+# Lock the active account or every account at once
 rbw lock
 rbw lock --all
 
-# Rename or remove an account (use --keep-data to retain local DB/Touch ID/YubiKey keys)
+# Rename or remove an account (--keep-data retains local DB/Touch ID/YubiKey keys)
 rbw account rename personal bw
 rbw account remove bw
 ```
 
-Switching accounts keeps previously unlocked accounts unlocked in `rbw-agent`
-memory until their individual `lock_timeout` expires or `rbw lock` /
-`rbw lock --all` is run. Per-account configuration overrides can be set with
-`rbw config set` (and global defaults with `rbw config set --global`). The
-built-in SSH agent dynamically serves SSH keys for the currently active account.
+Switching accounts keeps previously unlocked accounts unlocked in `rbw-agent` memory until their individual `lock_timeout` expires or `rbw lock` / `rbw lock --all` is run. Per-account configuration overrides use `rbw config set` (global defaults use `rbw config set --global`). Existing single-account `config.json` files migrate automatically.
 
-Existing single-account `config.json` files continue to work unchanged and are
-migrated automatically when you add another account.
-
-### Profiles
-
-`rbw` also supports completely isolated configuration profiles via the
-`RBW_PROFILE` environment variable. Setting it to a name (for example,
-`RBW_PROFILE=work` or `RBW_PROFILE=personal`) gives that profile its own
-separate configuration file, local cache, data directory, runtime sockets, and
-background `rbw-agent` process.
+For completely isolated config, cache, runtime sockets, and separate `rbw-agent` daemons, set `RBW_PROFILE` (e.g. `RBW_PROFILE=work`).
 
 ## Usage
 
-Commands can generally be used directly, and will handle logging in or
-unlocking as necessary. For instance, running `rbw ls` will run `rbw unlock` to
-unlock the password database before generating the list of entries (but will
-not attempt to log in to the server), `rbw sync` will automatically run `rbw
-login` to log in to the server before downloading the password database (but
-will not unlock the database), and `rbw add` will do both.
+Commands automatically log in or unlock as needed: `rbw ls` unlocks the local database, `rbw sync` logs in and refreshes the vault, and `rbw add` does both. Run `rbw help` for the full command reference.
 
-Logging into the server and unlocking the database will only be done as
-necessary, so running `rbw login` when you are already logged in will do
-nothing, and similarly for `rbw unlock`. If necessary, you can explicitly log
-out by running `rbw purge`, and you can explicitly lock the database by running
-`rbw lock` or `rbw stop-agent`.
-
-`rbw help` can be used to get more information about the available
-functionality.
-
-Run `rbw get <name>` to get your passwords. If you also want to get the username
-or the note associated, you can use the flag `--full`. You can also use the flag
-`--field={field}` to get whatever default or custom field you want. The `--raw`
-flag will show the output as JSON. In addition to matching against the name,
-you can pass a UUID as the name to search for the entry with that id, or a
-URL to search for an entry with a matching website entry.
-
-*Note to users of the official Bitwarden server (at bitwarden.com)*: The
-official server has a tendency to detect command line traffic as bot traffic
-(see [this issue](https://github.com/bitwarden/cli/issues/383) for details). In
-order to use `rbw` with the official Bitwarden server, you will need to first
-run `rbw register` to register each device using `rbw` with the Bitwarden
-server. This will prompt you for your personal API key which you can find using
-the instructions [here](https://bitwarden.com/help/article/personal-api-key/).
+```sh
+rbw ls --fields name,user,folder        # List entries (tab-separated, or --raw JSON)
+rbw search github                       # Search across name, username, URI, and notes
+rbw get github                          # Print password (matches name, UUID, or URL)
+rbw get github --full                   # Include username, notes, and custom fields
+rbw get github --field username         # Extract a specific default or custom field
+rbw get github --raw                    # Output entry as JSON
+rbw code github --clipboard             # Copy live TOTP code (alias: rbw totp)
+rbw gen 24 --nonconfusables             # Generate a password (or --diceware 5)
+rbw edit github                         # Edit password & notes in $VISUAL / $EDITOR
+rbw lock && rbw stop-agent              # Lock vault or shut down the background agent
+rbw purge                               # Log out and delete local encrypted cache
+```
 
 ### Password History & Secure Notes
 
-View password versions in chronological order from oldest (`v1`) to current:
+View password versions chronologically from oldest (`v1`) to current:
 
 ```sh
 rbw history <entry>
@@ -255,8 +187,7 @@ rbw history <entry> --version 1
 rbw history <entry> --version current --clipboard
 ```
 
-Create a new Secure Note via `$EDITOR` or piped `stdin` (piped `stdin` preserves
-leading `#` lines such as Markdown headings):
+Create a Secure Note via `$EDITOR` or piped `stdin` (piped `stdin` preserves leading `#` lines such as Markdown headings):
 
 ```sh
 rbw add --note "My Secret Note" --folder personal
@@ -265,10 +196,7 @@ printf '# Runbook\nSecret steps\n' | rbw add --type note "Runbook"
 
 ### Attachments
 
-Run `rbw sync` to refresh attachment metadata. List attachments with
-`rbw attachment list <entry>` (or `rbw get <entry> --raw`), upload new files
-(supports both Bitwarden Cloud Azure uploads and Vaultwarden / self-hosted
-Direct uploads), download exact binary files, or remove attachments:
+Run `rbw sync` to refresh attachment metadata. Supports both Bitwarden Cloud Azure SAS uploads and Vaultwarden / self-hosted Direct uploads:
 
 ```sh
 # List attachments
@@ -279,7 +207,7 @@ rbw attachment list <entry> --raw
 rbw attachment upload <entry> --file ./document.pdf
 cat secret.key | rbw attachment upload <entry> --file - --name secret.key
 
-# Download an attachment (via `rbw get` or `rbw attachment download`)
+# Download an attachment (atomic 0600, no-clobber, refuses binary to TTY)
 rbw get <entry> --attachment document.pdf --output ./document.pdf
 rbw get <entry> --attachment <attachment-id> --output - > ./document.pdf
 rbw attachment download <entry> --attachment document.pdf --output ./document.pdf
@@ -288,49 +216,40 @@ rbw attachment download <entry> --attachment document.pdf --output ./document.pd
 rbw attachment remove <entry> --attachment document.pdf
 ```
 
-Existing username, `--folder`, `--ignorecase`, and `-a/--account` selectors
-apply. Duplicate filenames require an attachment ID. Attachment operations need
-a network connection and honor the entry's master-password reprompt. Downloads
-write exact binary bytes (including empty files) atomically with `0600`
-permissions, never overwrite existing files, and refuse writing binary output
-directly to a terminal.
+All standard selectors (username, `--folder`, `--ignorecase`, `-a/--account`) apply. Duplicate filenames require an attachment ID. Attachment operations honor master-password reprompt.
 
 ### SSH Agent
 
-`rbw-agent` includes a built-in SSH agent for signing SSH authentication
-challenges directly. To use it, ensure that rbw is running (in order to make
-it start handling ssh agent requests), and then point your SSH client to the
-SSH agent socket:
+`rbw-agent` includes a built-in SSH agent serving SSH key entries for the active account:
 
 ```sh
 rbw unlock
 export SSH_AUTH_SOCK="$XDG_RUNTIME_DIR/rbw/ssh-agent-socket"
 ```
 
-If you're using a profile, the socket will be located at
-`"XDG_RUNTIME_DIR/rbw-<profile>/ssh-agent-socket"`.
+When using `RBW_PROFILE`, the socket lives at `"$XDG_RUNTIME_DIR/rbw-<profile>/ssh-agent-socket"`.
 
-### MCP Server (Model Context Protocol 2.0)
+## Biometrics, FIDO2 & Passkeys
 
-`rbw` ships a local-only **MCP 2.0 (`2026-07-28`)** stdio server backed by
-`rbw-agent` (enabled by the default `mcp` Cargo feature). Unlike stateless
-CLI wrappers, it requires no `BW_SESSION` token in your MCP config, supports
-multi-account vaults, triggers local Touch ID / YubiKey / `pinentry`
-out-of-band on unlock, and exposes a compact, fully annotated toolset:
+- **macOS Touch ID:** Enable with `rbw config set touchid true`. Stores only the derived 64-byte master key (never your master password) in the macOS login keychain, falls back to `pinentry` automatically, and clears keys when disabled or on `rbw purge`.
+- **FIDO2 / YubiKey Local Unlock:** Enable with `rbw config set yubikey true` and enroll one or more keys via `rbw yubikey enroll` (`list`, `remove`, `clear`). Uses CTAP2 `hmac-secret` to wrap the derived master key (`0600` ciphertext in `data_dir`). Require PIN/biometric UV with `rbw config set yubikey_uv true`.
+- **Passwordless Passkey Login:** Run `rbw login --passkey` (or set `rbw config set passkey_login true`) to authenticate with WebAuthn PRF vault decryption on servers supporting `grant_type=webauthn` (official Bitwarden Cloud).
+- **2FA Support:** Email, Authenticator App (TOTP), Yubico OTP, and native FIDO2 / WebAuthn over USB HID (macOS &amp; Linux; Duo is unsupported). On Linux, native FIDO2 uses `hidraw` and requires udev permissions (handled automatically by modern `systemd` or `libfido2` udev rules).
 
-* **Default (read-only — 5 tools):** `vault_status`, `vault_search` (metadata
-  only, never secrets), `vault_get` (defaults to `mode="summary"`; supports
-  `mode="field"`, `totp`, `history`, `full`, and `copy_to_clipboard: true` to
-  copy secrets without placing plaintext in the LLM context), `vault_generate`,
-  and `vault_session` (`unlock`, `lock`, `sync`, `switch_account`).
-* **Write & delete (`--allow-write` or `RBW_MCP_ALLOW_WRITE=1` — +2 tools):**
-  `vault_write` (`create_item`, `update_item`, `create_folder`) and
-  `vault_delete` (`item`, `attachment`, marked `destructiveHint: true`).
-* **Attachments (`--allowed-dir <DIR>` or `RBW_MCP_ALLOWED_DIRS` — +1 tool):**
-  `vault_attachment` (`download` atomically with `0600` no-clobber; `upload`
-  also requires `--allow-write`).
+> [!NOTE]
+> Vault entries flagged with **Master Password Re-prompt** always require your master password via `pinentry`, even when Touch ID or YubiKey unlock is enabled.
 
-Example MCP client config:
+## MCP Server (Model Context Protocol 2.0)
+
+`rbw` ships a local-only **MCP 2.0 (`2026-07-28`)** stdio server backed by `rbw-agent` (enabled by the default `mcp` feature). It requires no `BW_SESSION` token in client configs, supports multi-account vaults, and triggers local Touch ID / YubiKey / `pinentry` out-of-band on unlock.
+
+| Mode | Activation | Exposed Tools |
+| :--- | :--- | :--- |
+| **Read-only (default)** | `rbw mcp` | `vault_status`, `vault_search` (metadata only), `vault_get` (`summary`, `field`, `totp`, `history`, `full`, `copy_to_clipboard`), `vault_generate`, `vault_session` (`unlock`, `lock`, `sync`, `switch_account`) |
+| **Write & Delete** | `--allow-write` or `RBW_MCP_ALLOW_WRITE=1` | `+ vault_write` (`create_item`, `update_item`, `create_folder`), `vault_delete` (`item`, `attachment`, `destructiveHint: true`) |
+| **Attachments** | `--allowed-dir <DIR>` or `RBW_MCP_ALLOWED_DIRS` | `+ vault_attachment` (`download` atomic `0600` no-clobber; `upload` also requires `--allow-write`) |
+
+Example MCP client configuration (read-only):
 
 ```json
 {
@@ -343,7 +262,7 @@ Example MCP client config:
 }
 ```
 
-To enable writes and attachment transfers inside a dedicated directory:
+With opt-in writes and a dedicated attachment directory:
 
 ```json
 {
@@ -356,15 +275,12 @@ To enable writes and attachment transfers inside a dedicated directory:
 }
 ```
 
-#### Bundled Agent Skill
+### Bundled Agent Skill
 
 `rbw` bundles an Agent Skill (`skills/rbw/`) in two ways:
 
-1. **MCP 2.0 SEP-2640 (`io.modelcontextprotocol/skills`):** `rbw mcp` serves
-   `skill://rbw/SKILL.md` and its references natively over `skills/list`,
-   `skills/get`, `resources/list`, `resources/read`, and
-   `resources/directory/read` with SHA-256 integrity digests.
-2. **Local installation for agent runtimes (`agy`, `omp`, Claude Code, cross-agent):**
+1. **MCP 2.0 SEP-2640 (`io.modelcontextprotocol/skills`):** `rbw mcp` serves `skill://rbw/SKILL.md` and references natively over `skills/list`, `skills/get`, `resources/list`, `resources/read`, and `resources/directory/read` with SHA-256 digests.
+2. **Local installation for agent runtimes:**
 
 ```sh
 rbw mcp install-skill --target agents   # ~/.agents/skills/rbw (default)
@@ -374,35 +290,48 @@ rbw mcp install-skill --target claude   # ~/.claude/skills/rbw
 rbw mcp install-skill --target all --force
 ```
 
-### 2FA and Passkey support
+## Configuration
 
-`rbw` supports the following 2FA mechanisms:
+Inspect or modify settings with `rbw config show`, `rbw config set <key> <value>`, and `rbw config unset <key>` (add `--global` for global defaults):
 
-* Email
-* Authenticator App
-* Yubico OTP security key (https://support.yubico.com/hc/en-us/articles/360013712639-Testing-Yubico-OTP)
-* FIDO2 / WebAuthn security key (native CTAP2 over USB HID on macOS and Linux)
+| Option | Default | Description |
+| :--- | :--- | :--- |
+| `email` | *(required)* | Account email address for Bitwarden / Vaultwarden login. |
+| `sso_id` | *(unset)* | SSO organization ID (defaults to standard login if unset). |
+| `base_url` | `https://api.bitwarden.com/` | Bitwarden / Vaultwarden server base URL. |
+| `identity_url` | `<base_url>/identity` or `https://identity.bitwarden.com/` | Identity server URL. |
+| `ui_url` | `https://vault.bitwarden.com/` | Web vault UI URL. |
+| `notifications_url` | `<base_url>/notifications` or `https://notifications.bitwarden.com/` | WebSocket notifications server URL. |
+| `lock_timeout` | `3600` | Seconds to keep master keys in memory before auto-locking. |
+| `sync_interval` | `3600` | Background vault sync interval in seconds (`0` disables periodic sync). |
+| `pinentry` | `pinentry` | Executable used for password prompts (e.g. `pinentry-mac`, `pinentry-curses`). |
+| `touchid` | `false` | *(macOS only)* Unlock local vault using Touch ID / Apple Watch. |
+| `yubikey` | `false` | Unlock local vault using enrolled FIDO2 / YubiKey security keys (`hmac-secret`). |
+| `yubikey_uv` | `false` | Require FIDO2 User Verification (PIN / biometric) on local YubiKey unlock. |
+| `passkey_login` | `false` | Default `rbw login` to passwordless WebAuthn PRF passkey login. |
 
-Duo security is an unsupported 2FA mechanism.
+## Shell Completions
 
-`rbw` also supports passwordless passkey login (`rbw login --passkey`) with
-WebAuthn PRF vault decryption on servers that support `grant_type=webauthn`
-(official Bitwarden servers; Vaultwarden currently supports FIDO2 WebAuthn 2FA
-via regular `rbw login`).
+Generate shell completions (including dynamic entry/account completion for `bash`, `zsh`, and `fish`):
 
-On Linux, native FIDO2 access uses `hidraw` and requires udev permissions for
-FIDO devices (handled automatically by modern `systemd`, or via `libfido2` /
-`fido2` udev rules).
+```sh
+rbw gen-completions zsh  > ~/.zfunc/_rbw
+rbw gen-completions bash > ~/.local/share/bash-completion/completions/rbw
+rbw gen-completions fish > ~/.config/fish/completions/rbw.fish
+```
 
-If you use only unsupported 2FA mechanism, you need to add a supported 2FA
-mechanism on your bitwarden account to use rbw. It allows you to use rbw
-with a supported mechanism, and use other clients with you preferred
-2FA mechanism.
+Also supports `powershell`, `elvish`, `nushell`, and `fig`.
 
-## Related projects
+## Related Projects
 
-* [rofi-rbw](https://github.com/fdw/rofi-rbw): A rofi frontend for Bitwarden
-* [bw-ssh](https://framagit.org/Glandos/bw-ssh/): Manage SSH key passphrases in Bitwarden
-* [rbw-menu](https://github.com/rbuchberger/rbw-menu): Tiny menu picker for rbw
-* [ulauncher-rbw](https://0xacab.org/varac-projects/ulauncher-rbw): [Ulauncher](https://ulauncher.io/) rbw extension
-* [fuzzel-rbw](https://github.com/sammhansen/fuzzel-rbw): A fuzzel frontend for Bitwarden
+- [rofi-rbw](https://github.com/fdw/rofi-rbw) — Rofi frontend for Bitwarden
+- [bw-ssh](https://framagit.org/Glandos/bw-ssh/) — Manage SSH key passphrases in Bitwarden
+- [rbw-menu](https://github.com/rbuchberger/rbw-menu) — Tiny menu picker for `rbw`
+- [ulauncher-rbw](https://0xacab.org/varac-projects/ulauncher-rbw) — Ulauncher `rbw` extension
+- [fuzzel-rbw](https://github.com/sammhansen/fuzzel-rbw) — Fuzzel frontend for Bitwarden
+
+## Credits & License
+
+Originally created by [Jesse Luehrs (`doy/rbw`)](https://github.com/doy/rbw), extended with multi-account, Touch ID, FIDO2/YubiKey, attachments, password history, MCP 2.0, and standalone release tooling.
+
+Licensed under the [MIT License](LICENSE).

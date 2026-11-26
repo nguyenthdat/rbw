@@ -101,8 +101,8 @@ jobs:
 
   build:
     needs: prepare
-    fail-fast: false
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
