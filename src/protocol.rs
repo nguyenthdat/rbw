@@ -1,6 +1,6 @@
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 
-const PROTOCOL_REVISION: u32 = 1;
+const PROTOCOL_REVISION: u32 = 2;
 
 pub const VERSION: u32 = {
     const fn unwrap(res: &Result<u32, std::num::ParseIntError>) -> u32 {
@@ -196,6 +196,19 @@ pub enum Action {
         email: String,
     },
     Sync,
+    DownloadAttachment {
+        entry_id: String,
+        attachment_id: String,
+    },
+    UploadAttachment {
+        entry_id: String,
+        file_name: String,
+        data: String,
+    },
+    DeleteAttachment {
+        entry_id: String,
+        attachment_id: String,
+    },
     YubikeyEnroll {
         label: Option<String>,
     },
@@ -233,6 +246,12 @@ pub enum Response {
     },
     Decrypt {
         plaintext: String,
+    },
+    DownloadAttachment {
+        data: String,
+    },
+    UploadAttachment {
+        attachment_id: String,
     },
     Encrypt {
         cipherstring: String,
@@ -290,5 +309,38 @@ mod tests {
             }
             other => panic!("unexpected response: {other:?}"),
         }
+
+        let upload_req = Request::new_for_account(
+            Environment::default(),
+            Some("work".to_string()),
+            Action::UploadAttachment {
+                entry_id: "cipher-1".to_string(),
+                file_name: "cert.pem".to_string(),
+                data: "AQID".to_string(),
+            },
+        );
+        let upload_json = serde_json::to_string(&upload_req).unwrap();
+        let (action, _, account) =
+            serde_json::from_str::<Request>(&upload_json)
+                .unwrap()
+                .into_parts();
+        assert_eq!(account.as_deref(), Some("work"));
+        assert!(matches!(
+            action,
+            Action::UploadAttachment {
+                ref entry_id,
+                ref file_name,
+                ref data,
+            } if entry_id == "cipher-1" && file_name == "cert.pem" && data == "AQID"
+        ));
+
+        let upload_res = Response::UploadAttachment {
+            attachment_id: "att-1".to_string(),
+        };
+        let upload_res_json = serde_json::to_string(&upload_res).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Response>(&upload_res_json).unwrap(),
+            Response::UploadAttachment { ref attachment_id } if attachment_id == "att-1"
+        ));
     }
 }

@@ -218,6 +218,71 @@ pub fn decrypt(
     }
 }
 
+pub fn download_attachment(
+    account: Option<&str>,
+    entry_id: &str,
+    attachment_id: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let mut sock = connect()?;
+    sock.send(&rbw::protocol::Request::new_for_account(
+        get_environment(),
+        account.map(std::string::ToString::to_string),
+        rbw::protocol::Action::DownloadAttachment {
+            entry_id: entry_id.to_string(),
+            attachment_id: attachment_id.to_string(),
+        },
+    ))?;
+
+    match recv_final(&mut sock)? {
+        rbw::protocol::Response::DownloadAttachment { data } => {
+            rbw::base64::decode(&data).context("invalid attachment response")
+        }
+        rbw::protocol::Response::Error { error } => anyhow::bail!("{error}"),
+        // Do not include a response containing file contents in an error.
+        _ => anyhow::bail!("unexpected attachment response"),
+    }
+}
+
+pub fn upload_attachment(
+    account: Option<&str>,
+    entry_id: &str,
+    file_name: &str,
+    data: &[u8],
+) -> anyhow::Result<String> {
+    let mut sock = connect()?;
+    sock.send(&rbw::protocol::Request::new_for_account(
+        get_environment(),
+        account.map(std::string::ToString::to_string),
+        rbw::protocol::Action::UploadAttachment {
+            entry_id: entry_id.to_string(),
+            file_name: file_name.to_string(),
+            data: rbw::base64::encode(data),
+        },
+    ))?;
+
+    match recv_final(&mut sock)? {
+        rbw::protocol::Response::UploadAttachment { attachment_id } => {
+            Ok(attachment_id)
+        }
+        rbw::protocol::Response::Error { error } => anyhow::bail!("{error}"),
+        _ => anyhow::bail!("unexpected attachment upload response"),
+    }
+}
+
+pub fn delete_attachment(
+    account: Option<&str>,
+    entry_id: &str,
+    attachment_id: &str,
+) -> anyhow::Result<()> {
+    simple_action(
+        account,
+        rbw::protocol::Action::DeleteAttachment {
+            entry_id: entry_id.to_string(),
+            attachment_id: attachment_id.to_string(),
+        },
+    )
+}
+
 pub fn encrypt(
     account: Option<&str>,
     plaintext: &str,

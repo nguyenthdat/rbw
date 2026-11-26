@@ -1,6 +1,9 @@
 use anyhow::Context as _;
 use sha2::Digest as _;
 
+static DB_WRITE_LOCK: tokio::sync::Mutex<()> =
+    tokio::sync::Mutex::const_new(());
+
 pub async fn register(
     sock: &mut crate::sock::Sock,
     account: Option<&str>,
@@ -1529,7 +1532,7 @@ pub async fn sync_for_config(
     config: &rbw::config::Config,
     key: &rbw::config::AccountKey,
 ) -> anyhow::Result<()> {
-    let mut db = load_db(config).await?;
+    let db = load_db(config).await?;
 
     let access_token = if let Some(access_token) = &db.access_token {
         access_token.clone()
@@ -1552,6 +1555,9 @@ pub async fn sync_for_config(
         .await
         .ensure_account(key, config)
         .set_master_password_reprompt(&entries);
+    let write_guard = DB_WRITE_LOCK.lock().await;
+    // Preserve updates made while the server request was in flight.
+    let mut db = load_db(config).await?;
     if let Some(access_token) = access_token {
         db.access_token = Some(access_token);
     }
@@ -1559,7 +1565,8 @@ pub async fn sync_for_config(
     db.protected_private_key = Some(protected_private_key);
     db.protected_org_keys = protected_org_keys;
     db.entries = entries;
-    save_db(config, &db).await?;
+    save_db_unlocked(config, &db).await?;
+    drop(write_guard);
 
     if let Err(e) =
         subscribe_to_notifications(state.clone(), config, key).await
@@ -1623,79 +1630,7 @@ async fn decrypt_cipher(
         .master_password_reprompt
         .contains(&master_password_reprompt)
     {
-        let db = load_db(config).await?;
-
-        let Some(kdf) = db.kdf else {
-            return Err(anyhow::anyhow!("failed to find kdf type in db"));
-        };
-
-        let Some(iterations) = db.iterations else {
-            return Err(anyhow::anyhow!(
-                "failed to find number of iterations in db"
-            ));
-        };
-
-        let memory = db.memory;
-        let parallelism = db.parallelism;
-
-        let Some(protected_key) = db.protected_key else {
-            return Err(anyhow::anyhow!(
-                "failed to find protected key in db"
-            ));
-        };
-        let Some(protected_private_key) = db.protected_private_key else {
-            return Err(anyhow::anyhow!(
-                "failed to find protected private key in db"
-            ));
-        };
-
-        let email = &key.email;
-
-        let mut err_msg = None;
-        for i in 1_u8..=3 {
-            let err = if i > 1 {
-                // this unwrap is safe because we only ever continue the loop
-                // if we have set err_msg
-                Some(format!("{} (attempt {}/3)", err_msg.unwrap(), i))
-            } else {
-                None
-            };
-            let password = rbw::pinentry::getpin(
-                &config.pinentry,
-                "Master Password",
-                "Accessing this entry requires the master password",
-                err.as_deref(),
-                environment,
-                true,
-            )
-            .await
-            .context("failed to read password from pinentry")?;
-            match rbw::actions::unlock(
-                email,
-                &password,
-                kdf,
-                iterations,
-                memory,
-                parallelism,
-                &protected_key,
-                &protected_private_key,
-                &db.protected_org_keys,
-            ) {
-                Ok(_) => {
-                    break;
-                }
-                Err(rbw::error::Error::IncorrectPassword { message }) => {
-                    if i == 3 {
-                        return Err(rbw::error::Error::IncorrectPassword {
-                            message,
-                        })
-                        .context("failed to unlock database");
-                    }
-                    err_msg = Some(message);
-                }
-                Err(e) => return Err(e).context("failed to unlock database"),
-            }
-        }
+        reprompt(config, key, environment).await?;
     }
 
     let cipherstring = rbw::cipherstring::CipherString::new(cipherstring)
@@ -1708,6 +1643,319 @@ async fn decrypt_cipher(
     .context("failed to parse decrypted secret")?;
 
     Ok(plaintext)
+}
+
+async fn reprompt(
+    config: &rbw::config::Config,
+    key: &rbw::config::AccountKey,
+    environment: &rbw::protocol::Environment,
+) -> anyhow::Result<()> {
+    let db = load_db(config).await?;
+
+    let Some(kdf) = db.kdf else {
+        return Err(anyhow::anyhow!("failed to find kdf type in db"));
+    };
+
+    let Some(iterations) = db.iterations else {
+        return Err(anyhow::anyhow!(
+            "failed to find number of iterations in db"
+        ));
+    };
+
+    let memory = db.memory;
+    let parallelism = db.parallelism;
+
+    let Some(protected_key) = db.protected_key else {
+        return Err(anyhow::anyhow!("failed to find protected key in db"));
+    };
+    let Some(protected_private_key) = db.protected_private_key else {
+        return Err(anyhow::anyhow!(
+            "failed to find protected private key in db"
+        ));
+    };
+
+    let email = &key.email;
+
+    let mut err_msg = None;
+    for i in 1_u8..=3 {
+        let err = if i > 1 {
+            // this unwrap is safe because we only ever continue the loop
+            // if we have set err_msg
+            Some(format!("{} (attempt {}/3)", err_msg.unwrap(), i))
+        } else {
+            None
+        };
+        let password = rbw::pinentry::getpin(
+            &config.pinentry,
+            "Master Password",
+            "Accessing this entry requires the master password",
+            err.as_deref(),
+            environment,
+            true,
+        )
+        .await
+        .context("failed to read password from pinentry")?;
+        match rbw::actions::unlock(
+            email,
+            &password,
+            kdf,
+            iterations,
+            memory,
+            parallelism,
+            &protected_key,
+            &protected_private_key,
+            &db.protected_org_keys,
+        ) {
+            Ok(_) => {
+                break;
+            }
+            Err(rbw::error::Error::IncorrectPassword { message }) => {
+                if i == 3 {
+                    return Err(rbw::error::Error::IncorrectPassword {
+                        message,
+                    })
+                    .context("failed to unlock database");
+                }
+                err_msg = Some(message);
+            }
+            Err(e) => return Err(e).context("failed to unlock database"),
+        }
+    }
+    Ok(())
+}
+
+async fn persist_refreshed_token(
+    config: &rbw::config::Config,
+    expected_refresh_token: Option<&str>,
+    new_token: String,
+    operation: &str,
+) -> anyhow::Result<()> {
+    let _write_guard = DB_WRITE_LOCK.lock().await;
+    let mut latest = load_db(config).await?;
+    if latest.refresh_token.as_deref() != expected_refresh_token {
+        anyhow::bail!("login changed during {operation}");
+    }
+    latest.access_token = Some(new_token);
+    save_db_unlocked(config, &latest).await?;
+    Ok(())
+}
+
+pub async fn download_attachment(
+    sock: &mut crate::sock::Sock,
+    state: std::sync::Arc<tokio::sync::Mutex<crate::state::State>>,
+    account: Option<&str>,
+    environment: &rbw::protocol::Environment,
+    entry_id: &str,
+    attachment_id: &str,
+) -> anyhow::Result<rbw::config::AccountKey> {
+    let (config, key) = load_account_config(account).await?;
+    // The caller supplies identifiers only. Authorization, reprompt and key
+    // ownership come from an authenticated response, never an editable cache.
+    let db = load_db(&config).await?;
+    let access_token = db.access_token.as_deref().context("not logged in")?;
+    let refresh_token =
+        db.refresh_token.as_deref().context("not logged in")?;
+    let (new_token, (entry, attachment)) = rbw::actions::attachment(
+        &config,
+        access_token,
+        refresh_token,
+        entry_id,
+        attachment_id,
+    )
+    .await
+    .context("failed to fetch attachment metadata")?;
+    if let Some(token) = new_token {
+        persist_refreshed_token(
+            &config,
+            db.refresh_token.as_deref(),
+            token,
+            "attachment download",
+        )
+        .await?;
+    }
+    if entry.master_password_reprompt() {
+        reprompt(&config, &key, environment).await?;
+    }
+    let encrypted = rbw::actions::attachment_bytes(&config, &attachment)
+        .await
+        .context("failed to download attachment")?;
+    let plaintext = {
+        // A timeout/explicit lock during either network operation must still
+        // win. Do not clone keys or hold the state lock across network I/O.
+        let state = state.lock().await;
+        let keys = state
+            .account(&key)
+            .and_then(|acct| acct.key(entry.org_id.as_deref()))
+            .context("database is locked")?;
+        zeroize::Zeroizing::new(
+            rbw::attachment::decrypt(
+                &encrypted,
+                keys,
+                entry.key.as_deref(),
+                attachment.key.as_deref(),
+            )
+            .context("failed to decrypt attachment")?,
+        )
+    };
+    sock.send(&rbw::protocol::Response::DownloadAttachment {
+        data: rbw::base64::encode(&plaintext),
+    })
+    .await?;
+    Ok(key)
+}
+
+pub async fn upload_attachment(
+    sock: &mut crate::sock::Sock,
+    state: std::sync::Arc<tokio::sync::Mutex<crate::state::State>>,
+    account: Option<&str>,
+    environment: &rbw::protocol::Environment,
+    entry_id: &str,
+    file_name: &str,
+    data_b64: &str,
+) -> anyhow::Result<rbw::config::AccountKey> {
+    if file_name.is_empty() {
+        anyhow::bail!("attachment filename cannot be empty");
+    }
+    let (config, key) = load_account_config(account).await?;
+    let plaintext = zeroize::Zeroizing::new(
+        rbw::base64::decode(data_b64)
+            .context("invalid attachment upload payload")?,
+    );
+    let db = load_db(&config).await?;
+    let mut access_token =
+        db.access_token.clone().context("not logged in")?;
+    let refresh_token =
+        db.refresh_token.as_deref().context("not logged in")?;
+
+    // Fetch authoritative cipher metadata (org_id, item key, reprompt) from server.
+    let (new_token, entry) = rbw::actions::get_cipher(
+        &config,
+        &access_token,
+        refresh_token,
+        entry_id,
+    )
+    .await
+    .context("failed to fetch entry metadata")?;
+    if let Some(token) = new_token {
+        access_token.clone_from(&token);
+        persist_refreshed_token(
+            &config,
+            db.refresh_token.as_deref(),
+            token,
+            "attachment upload",
+        )
+        .await?;
+    }
+    if entry.master_password_reprompt() {
+        reprompt(&config, &key, environment).await?;
+    }
+
+    let encrypted = {
+        let state = state.lock().await;
+        let keys = state
+            .account(&key)
+            .and_then(|acct| acct.key(entry.org_id.as_deref()))
+            .context("database is locked")?;
+        rbw::attachment::encrypt(
+            file_name,
+            &plaintext,
+            keys,
+            entry.key.as_deref(),
+        )
+        .context("failed to encrypt attachment")?
+    };
+    drop(plaintext);
+
+    let (new_token, attachment_id) = rbw::actions::upload_attachment(
+        &config,
+        &access_token,
+        refresh_token,
+        entry_id,
+        &encrypted,
+    )
+    .await
+    .context("failed to upload attachment")?;
+    if let Some(token) = new_token {
+        persist_refreshed_token(
+            &config,
+            db.refresh_token.as_deref(),
+            token,
+            "attachment upload",
+        )
+        .await?;
+    }
+
+    sock.send(&rbw::protocol::Response::UploadAttachment { attachment_id })
+        .await?;
+    Ok(key)
+}
+
+pub async fn delete_attachment(
+    sock: &mut crate::sock::Sock,
+    state: std::sync::Arc<tokio::sync::Mutex<crate::state::State>>,
+    account: Option<&str>,
+    environment: &rbw::protocol::Environment,
+    entry_id: &str,
+    attachment_id: &str,
+) -> anyhow::Result<rbw::config::AccountKey> {
+    let (config, key) = load_account_config(account).await?;
+    if state.lock().await.needs_unlock(&key) {
+        anyhow::bail!("database is locked");
+    }
+    let db = load_db(&config).await?;
+    let mut access_token =
+        db.access_token.clone().context("not logged in")?;
+    let refresh_token =
+        db.refresh_token.as_deref().context("not logged in")?;
+
+    let (new_token, entry) = rbw::actions::get_cipher(
+        &config,
+        &access_token,
+        refresh_token,
+        entry_id,
+    )
+    .await
+    .context("failed to fetch entry metadata")?;
+    if let Some(token) = new_token {
+        access_token.clone_from(&token);
+        persist_refreshed_token(
+            &config,
+            db.refresh_token.as_deref(),
+            token,
+            "attachment removal",
+        )
+        .await?;
+    }
+    if !entry.attachments.iter().any(|a| a.id == attachment_id) {
+        anyhow::bail!("attachment not found in this entry");
+    }
+    if entry.master_password_reprompt() {
+        reprompt(&config, &key, environment).await?;
+    }
+    if state.lock().await.needs_unlock(&key) {
+        anyhow::bail!("database is locked");
+    }
+    let (new_token, ()) = rbw::actions::delete_attachment(
+        &config,
+        &access_token,
+        refresh_token,
+        entry_id,
+        attachment_id,
+    )
+    .await
+    .context("failed to delete attachment")?;
+    if let Some(token) = new_token {
+        persist_refreshed_token(
+            &config,
+            db.refresh_token.as_deref(),
+            token,
+            "attachment removal",
+        )
+        .await?;
+    }
+
+    respond_ack(sock).await?;
+    Ok(key)
 }
 
 pub async fn decrypt(
@@ -2017,6 +2265,14 @@ async fn load_db(
 }
 
 async fn save_db(
+    config: &rbw::config::Config,
+    db: &rbw::db::Db,
+) -> anyhow::Result<()> {
+    let _write_guard = DB_WRITE_LOCK.lock().await;
+    save_db_unlocked(config, db).await
+}
+
+async fn save_db_unlocked(
     config: &rbw::config::Config,
     db: &rbw::db::Db,
 ) -> anyhow::Result<()> {

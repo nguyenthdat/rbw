@@ -6,7 +6,7 @@ function __fish_rbw_get_completion_name
     set -l cmd (commandline -xpc)
     set -e cmd[1] # rbw
 
-    argparse -i a/account= folder= f/field= full raw clipboard i/ignorecase h/help l/list-fields -- $cmd
+    argparse -i a/account= folder= f/field= full raw clipboard i/ignorecase h/help l/list-fields attachment= output= -- $cmd
     set -e argv[1] # get
 
     set -l account_args
@@ -66,7 +66,7 @@ function __fish_rbw_get_completion_fields
         set -e cmd[-1] # -f/--field
     end
 
-    argparse -i a/account= folder= f/field= full raw clipboard i/ignorecase h/help l/list-fields -- $cmd
+    argparse -i a/account= folder= f/field= full raw clipboard i/ignorecase h/help l/list-fields attachment= output= -- $cmd
     set -e argv[1] # get
 
     set -l account_args
@@ -93,4 +93,6 @@ complete -f -c rbw -n '__fish_seen_subcommand_from get' -l folder -r -d 'Folder 
 complete -f -c rbw -n '__fish_seen_subcommand_from get' -l full -d 'Display the notes in addition to the password'
 complete -f -c rbw -n '__fish_seen_subcommand_from get' -l raw -d 'Display output as JSON'
 complete -f -c rbw -n '__fish_seen_subcommand_from get' -s c -l clipboard -d 'Copy result to clipboard'
+complete -f -c rbw -n '__fish_seen_subcommand_from get' -l attachment -r -d 'Download an attachment by exact filename or ID'
+complete -c rbw -n '__fish_seen_subcommand_from get' -l output -r -d 'Attachment output file, or - for binary stdout'
 complete -f -c rbw -n '__fish_seen_subcommand_from get' -s h -l help -d 'Print help'

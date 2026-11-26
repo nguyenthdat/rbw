@@ -207,6 +207,50 @@ async fn handle_request(
             .await?;
             None
         }
+        rbw::protocol::Action::DownloadAttachment {
+            entry_id,
+            attachment_id,
+        } => Some(
+            crate::actions::download_attachment(
+                sock,
+                state.clone(),
+                account.as_deref(),
+                &environment,
+                entry_id,
+                attachment_id,
+            )
+            .await?,
+        ),
+        rbw::protocol::Action::UploadAttachment {
+            entry_id,
+            file_name,
+            data,
+        } => Some(
+            crate::actions::upload_attachment(
+                sock,
+                state.clone(),
+                account.as_deref(),
+                &environment,
+                entry_id,
+                file_name,
+                data,
+            )
+            .await?,
+        ),
+        rbw::protocol::Action::DeleteAttachment {
+            entry_id,
+            attachment_id,
+        } => Some(
+            crate::actions::delete_attachment(
+                sock,
+                state.clone(),
+                account.as_deref(),
+                &environment,
+                entry_id,
+                attachment_id,
+            )
+            .await?,
+        ),
         rbw::protocol::Action::Decrypt {
             cipherstring,
             entry_key,

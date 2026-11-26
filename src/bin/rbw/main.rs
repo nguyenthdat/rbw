@@ -138,6 +138,20 @@ enum Opt {
         clipboard: bool,
         #[arg(short, long, help = "List fields in this entry")]
         list_fields: bool,
+        #[arg(
+            long,
+            help = "Download an attachment by exact filename or ID",
+            requires = "output",
+            conflicts_with_all = ["field", "full", "raw", "list_fields"]
+        )]
+        #[cfg_attr(feature = "clipboard", arg(conflicts_with = "clipboard"))]
+        attachment: Option<String>,
+        #[arg(
+            long,
+            help = "Attachment output file, or - for binary stdout",
+            requires = "attachment"
+        )]
+        output: Option<std::path::PathBuf>,
     },
 
     #[command(about = "Search for entries")]
@@ -172,16 +186,18 @@ enum Opt {
     },
 
     #[command(
-        about = "Add a new password to the database",
-        long_about = "Add a new password to the database\n\n\
-            This command will open a text editor to enter \
-            the password and notes. The editor to use is determined \
-            by the value of the $VISUAL or $EDITOR environment variables.
-            The first line will be saved as the password and the \
-            remainder will be saved as a note."
+        about = "Add a new login or secure note entry to the database",
+        long_about = "Add a new login or secure note entry to the database\n\n\
+            This command will open a text editor (or read piped stdin) to \
+            enter the entry contents. The editor to use is determined by the \
+            value of the $VISUAL or $EDITOR environment variables.\n\n\
+            For login entries (default), the first line will be saved as the \
+            password and the remainder will be saved as a note.\n\
+            For secure notes (--note / --type note), the entire content will \
+            be saved as the note."
     )]
     Add {
-        #[arg(help = "Name of the password entry")]
+        #[arg(help = "Name of the entry")]
         name: String,
         #[arg(help = "Username for the password entry")]
         user: Option<String>,
@@ -191,8 +207,22 @@ enum Opt {
             number_of_values = 1
         )]
         uri: Vec<String>,
-        #[arg(long, help = "Folder for the password entry")]
+        #[arg(long, help = "Folder for the entry")]
         folder: Option<String>,
+        #[arg(
+            short = 't',
+            long = "type",
+            value_enum,
+            conflicts_with = "note",
+            help = "Type of entry to add (login or note)"
+        )]
+        entry_type: Option<commands::AddEntryType>,
+        #[arg(
+            long,
+            conflicts_with_all = ["user", "uri", "entry_type"],
+            help = "Add a secure note instead of a login entry"
+        )]
+        note: bool,
     },
 
     #[command(
@@ -271,10 +301,39 @@ enum Opt {
         find_args: FindArgs,
     },
 
-    #[command(about = "View the password history for a given entry")]
+    #[command(
+        about = "View the password history for a given entry (oldest to current)"
+    )]
     History {
         #[command(flatten)]
         find_args: FindArgs,
+        #[arg(
+            short = 'v',
+            long,
+            value_name = "VERSION",
+            help = "Show only a specific version (e.g. 1, v1, or current)"
+        )]
+        version: Option<String>,
+        #[arg(long, help = "Display output as JSON")]
+        raw: bool,
+        #[cfg(feature = "clipboard")]
+        #[arg(
+            short,
+            long,
+            requires = "version",
+            conflicts_with = "raw",
+            help = "Copy the selected version's password to clipboard"
+        )]
+        clipboard: bool,
+    },
+
+    #[command(
+        about = "Manage file attachments on vault entries",
+        visible_alias = "attach"
+    )]
+    Attachment {
+        #[command(subcommand)]
+        action: AttachmentAction,
     },
 
     #[command(about = "Lock the password database")]
@@ -323,6 +382,9 @@ impl Opt {
             Self::Edit { .. } => "edit".to_string(),
             Self::Remove { .. } => "remove".to_string(),
             Self::History { .. } => "history".to_string(),
+            Self::Attachment { action } => {
+                format!("attachment {}", action.subcommand_name())
+            }
             Self::Lock { .. } => "lock".to_string(),
             Self::Purge => "purge".to_string(),
             Self::StopAgent => "stop-agent".to_string(),
@@ -522,6 +584,90 @@ impl YubikeyAction {
     }
 }
 
+#[derive(Debug, clap::Subcommand)]
+enum AttachmentAction {
+    #[command(
+        about = "List attachments for a given entry",
+        visible_alias = "ls"
+    )]
+    List {
+        #[command(flatten)]
+        find_args: FindArgs,
+        #[arg(long, help = "Display output as JSON")]
+        raw: bool,
+    },
+    #[command(
+        about = "Upload a file attachment to a given entry",
+        visible_alias = "add"
+    )]
+    Upload {
+        #[command(flatten)]
+        find_args: FindArgs,
+        #[arg(
+            short = 'f',
+            long = "file",
+            value_name = "PATH",
+            help = "Path to the file to upload, or - to read from stdin"
+        )]
+        file: std::path::PathBuf,
+        #[arg(
+            long = "name",
+            value_name = "FILENAME",
+            help = "Override the attachment filename stored in the vault (required when reading from stdin)"
+        )]
+        file_name: Option<String>,
+    },
+    #[command(
+        about = "Download an attachment from a given entry",
+        visible_alias = "get"
+    )]
+    Download {
+        #[command(flatten)]
+        find_args: FindArgs,
+        #[arg(
+            short = 'A',
+            long = "attachment",
+            value_name = "NAME_OR_ID",
+            help = "Exact filename or attachment ID to download"
+        )]
+        attachment: String,
+        #[arg(
+            short = 'o',
+            long,
+            value_name = "PATH",
+            help = "Output file path, or - for binary stdout"
+        )]
+        output: std::path::PathBuf,
+    },
+    #[command(
+        about = "Remove an attachment from a given entry",
+        visible_alias = "rm"
+    )]
+    Remove {
+        #[command(flatten)]
+        find_args: FindArgs,
+        #[arg(
+            short = 'A',
+            long = "attachment",
+            value_name = "NAME_OR_ID",
+            help = "Exact filename or attachment ID to remove"
+        )]
+        attachment: String,
+    },
+}
+
+impl AttachmentAction {
+    fn subcommand_name(&self) -> String {
+        match self {
+            Self::List { .. } => "list",
+            Self::Upload { .. } => "upload",
+            Self::Download { .. } => "download",
+            Self::Remove { .. } => "remove",
+        }
+        .to_string()
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     let env_account = std::env::var("RBW_ACCOUNT").ok();
@@ -639,6 +785,8 @@ fn main() {
             #[cfg(feature = "clipboard")]
             clipboard,
             list_fields,
+            attachment,
+            output,
         } => commands::get(
             account,
             find_args.needle.clone(),
@@ -653,6 +801,8 @@ fn main() {
             false,
             find_args.ignorecase,
             list_fields,
+            attachment.as_deref(),
+            output.as_deref(),
         ),
         Opt::Search {
             term,
@@ -682,17 +832,27 @@ fn main() {
             user,
             uri,
             folder,
-        } => commands::add(
-            account,
-            &name,
-            user.as_deref(),
-            &uri.iter()
-                // XXX not sure what the ui for specifying the match type
-                // should be
-                .map(|uri| (uri.clone(), None))
-                .collect::<Vec<_>>(),
-            folder.as_deref(),
-        ),
+            entry_type,
+            note,
+        } => {
+            let entry_type = if note {
+                commands::AddEntryType::Note
+            } else {
+                entry_type.unwrap_or_default()
+            };
+            commands::add(
+                account,
+                &name,
+                user.as_deref(),
+                &uri.iter()
+                    // XXX not sure what the ui for specifying the match type
+                    // should be
+                    .map(|uri| (uri.clone(), None))
+                    .collect::<Vec<_>>(),
+                folder.as_deref(),
+                entry_type,
+            )
+        }
         Opt::Generate {
             len,
             name,
@@ -743,13 +903,74 @@ fn main() {
             find_args.folder.as_deref(),
             find_args.ignorecase,
         ),
-        Opt::History { find_args } => commands::history(
+        Opt::History {
+            find_args,
+            version,
+            raw,
+            #[cfg(feature = "clipboard")]
+            clipboard,
+        } => commands::history(
             account,
             find_args.needle,
             find_args.user.as_deref(),
             find_args.folder.as_deref(),
             find_args.ignorecase,
+            version.as_deref(),
+            raw,
+            #[cfg(feature = "clipboard")]
+            clipboard,
+            #[cfg(not(feature = "clipboard"))]
+            false,
         ),
+        Opt::Attachment { action } => match action {
+            AttachmentAction::List { find_args, raw } => {
+                commands::attachment_list(
+                    account,
+                    find_args.needle,
+                    find_args.user.as_deref(),
+                    find_args.folder.as_deref(),
+                    find_args.ignorecase,
+                    raw,
+                )
+            }
+            AttachmentAction::Upload {
+                find_args,
+                file,
+                file_name,
+            } => commands::attachment_upload(
+                account,
+                find_args.needle,
+                find_args.user.as_deref(),
+                find_args.folder.as_deref(),
+                find_args.ignorecase,
+                &file,
+                file_name.as_deref(),
+            ),
+            AttachmentAction::Download {
+                find_args,
+                attachment,
+                output,
+            } => commands::attachment_download(
+                account,
+                find_args.needle,
+                find_args.user.as_deref(),
+                find_args.folder.as_deref(),
+                find_args.ignorecase,
+                &attachment,
+                &output,
+            ),
+            AttachmentAction::Remove {
+                find_args,
+                attachment,
+            } => commands::attachment_remove(
+                account,
+                find_args.needle,
+                find_args.user.as_deref(),
+                find_args.folder.as_deref(),
+                find_args.ignorecase,
+                &attachment,
+            ),
+        },
         Opt::Lock { all } => commands::lock(account, all),
         Opt::Purge => commands::purge(account),
         Opt::StopAgent => commands::stop_agent(),
@@ -908,5 +1129,202 @@ mod tests {
                 }
             } if key == "lock_timeout" && value == "1800"
         ));
+    }
+
+    #[test]
+    fn test_cli_history_secure_note_and_attachments() {
+        Cli::command().debug_assert();
+
+        // PR #389 attachment flags on `rbw get`
+        for option in ["--raw", "--full", "--list-fields"] {
+            assert!(
+                Cli::try_parse_from([
+                    "rbw",
+                    "get",
+                    "entry",
+                    "--attachment",
+                    "file",
+                    "--output",
+                    "out",
+                    option,
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "rbw",
+                "get",
+                "entry",
+                "--attachment",
+                "file"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from(["rbw", "get", "entry", "--output", "out"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rbw",
+                "get",
+                "entry",
+                "user",
+                "--folder",
+                "folder",
+                "--ignorecase",
+                "--attachment",
+                "file",
+                "--output",
+                "-",
+            ])
+            .is_ok()
+        );
+        #[cfg(feature = "clipboard")]
+        assert!(
+            Cli::try_parse_from([
+                "rbw",
+                "get",
+                "entry",
+                "--attachment",
+                "file",
+                "--output",
+                "out",
+                "--clipboard",
+            ])
+            .is_err()
+        );
+
+        // History flags
+        let cli = Cli::try_parse_from([
+            "rbw",
+            "history",
+            "github",
+            "--version",
+            "1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Opt::History {
+                version: Some(ref v),
+                raw: false,
+                ..
+            } if v == "1"
+        ));
+        assert!(
+            Cli::try_parse_from(["rbw", "history", "github", "--raw"])
+                .is_ok()
+        );
+        #[cfg(feature = "clipboard")]
+        {
+            assert!(
+                Cli::try_parse_from(["rbw", "history", "github", "-c"])
+                    .is_err()
+            );
+            assert!(
+                Cli::try_parse_from([
+                    "rbw", "history", "github", "-v", "current", "-c",
+                ])
+                .is_ok()
+            );
+            assert!(
+                Cli::try_parse_from([
+                    "rbw", "history", "github", "-v", "1", "-c", "--raw",
+                ])
+                .is_err()
+            );
+        }
+
+        // SecureNote add flags
+        let cli = Cli::try_parse_from([
+            "rbw", "add", "--note", "My Note", "--folder", "personal",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Opt::Add {
+                ref name,
+                note: true,
+                entry_type: None,
+                folder: Some(ref f),
+                ..
+            } if name == "My Note" && f == "personal"
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "rbw",
+                "add",
+                "--type",
+                "secure-note",
+                "My Note",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["rbw", "add", "--note", "My Note", "user"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rbw",
+                "add",
+                "--note",
+                "My Note",
+                "--uri",
+                "https://example.com",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rbw", "add", "--note", "--type", "login", "My Note",
+            ])
+            .is_err()
+        );
+
+        // Attachment subcommands
+        assert!(
+            Cli::try_parse_from([
+                "rbw",
+                "attachment",
+                "upload",
+                "entry",
+                "--file",
+                "./secret.pdf",
+                "--name",
+                "renamed.pdf",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["rbw", "attach", "ls", "entry", "--raw"])
+                .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rbw",
+                "attachment",
+                "download",
+                "entry",
+                "--attachment",
+                "secret.pdf",
+                "--output",
+                "./out.pdf",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "rbw",
+                "attachment",
+                "rm",
+                "entry",
+                "-A",
+                "secret.pdf",
+            ])
+            .is_ok()
+        );
     }
 }

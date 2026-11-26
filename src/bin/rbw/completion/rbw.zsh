@@ -37,7 +37,7 @@ _rbw_wrapper() {
       cur="${(Q)words[i]}"
 
       case "$cur" in
-        --folder|-f|--field|-a|--account)
+        --folder|-f|--field|-a|--account|--attachment|--output)
           (( i++ ))
           ;;
         -*)
@@ -78,7 +78,7 @@ _rbw_wrapper() {
         rbw "${account_args[@]}" list --fields folder 2>/dev/null \
           | awk -v folder="$folder" 'NF && $1 ~ folder {print $1}' 2>/dev/null
       )
-    elif [[ "$prev" != --field ]]; then
+    elif [[ "$prev" != --field && "$prev" != --attachment && "$prev" != --output ]]; then
       if [ -z "$name" ]; then
         # rbw get ... $cur
         res=$(
@@ -98,7 +98,7 @@ _rbw_wrapper() {
     fi
 
     if [[ "$cur" == -* ]] && [[ "$cur" != "--folder="* ]]; then
-      res=$'-a\n--account\n-f\n--field\n--full\n--raw\n--clipboard\n-i\n--ignorecase\n-h\n--help\n'"$res"
+      res=$'-a\n--account\n-f\n--field\n--full\n--raw\n--clipboard\n-i\n--ignorecase\n--attachment\n--output\n-h\n--help\n'"$res"
       if [ -z "$folder" ]; then
         res=$'--folder\n'"$res"
       fi

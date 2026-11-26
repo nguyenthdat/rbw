@@ -266,6 +266,232 @@ async fn sync_once(
     client.sync(access_token).await
 }
 
+pub async fn get_cipher(
+    config: &crate::config::Config,
+    access_token: &str,
+    refresh_token: &str,
+    entry_id: &str,
+) -> Result<(Option<String>, crate::db::Entry)> {
+    with_exchange_refresh_token_async(
+        config,
+        access_token,
+        refresh_token,
+        |access_token| {
+            let config = config.clone();
+            let access_token = access_token.to_string();
+            let entry_id = entry_id.to_string();
+            Box::pin(async move {
+                let client = api_client_for(&config);
+                client.get_cipher(&access_token, &entry_id).await
+            })
+        },
+    )
+    .await
+}
+
+pub async fn attachment(
+    config: &crate::config::Config,
+    access_token: &str,
+    refresh_token: &str,
+    entry_id: &str,
+    attachment_id: &str,
+) -> Result<(
+    Option<String>,
+    (crate::db::Entry, crate::attachment::Attachment),
+)> {
+    with_exchange_refresh_token_async(
+        config,
+        access_token,
+        refresh_token,
+        |access_token| {
+            let config = config.clone();
+            let access_token = access_token.to_string();
+            let entry_id = entry_id.to_string();
+            let attachment_id = attachment_id.to_string();
+            Box::pin(async move {
+                let client = api_client_for(&config);
+                client
+                    .attachment(&access_token, &entry_id, &attachment_id)
+                    .await
+            })
+        },
+    )
+    .await
+}
+
+pub async fn attachment_bytes(
+    config: &crate::config::Config,
+    attachment: &crate::attachment::Attachment,
+) -> Result<Vec<u8>> {
+    let client = api_client_for(config);
+    client.attachment_bytes(attachment).await
+}
+
+pub async fn upload_attachment(
+    config: &crate::config::Config,
+    access_token: &str,
+    refresh_token: &str,
+    entry_id: &str,
+    encrypted: &crate::attachment::EncryptedAttachment,
+) -> Result<(Option<String>, String)> {
+    let encrypted_size =
+        u64::try_from(encrypted.data.len()).map_err(|_| {
+            Error::InvalidAttachment {
+                reason: "attachment size overflow".to_string(),
+            }
+        })?;
+    let (mut updated_token, v2_meta) = with_exchange_refresh_token_async(
+        config,
+        access_token,
+        refresh_token,
+        |access_token| {
+            let config = config.clone();
+            let access_token = access_token.to_string();
+            let entry_id = entry_id.to_string();
+            let file_name = encrypted.file_name.clone();
+            let key = encrypted.key.clone();
+            Box::pin(async move {
+                let client = api_client_for(&config);
+                client
+                    .upload_attachment_v2_metadata(
+                        &access_token,
+                        &entry_id,
+                        &file_name,
+                        encrypted_size,
+                        &key,
+                    )
+                    .await
+            })
+        },
+    )
+    .await?;
+
+    let mut current_token = updated_token
+        .clone()
+        .unwrap_or_else(|| access_token.to_string());
+
+    let Some(meta) = v2_meta else {
+        let (legacy_token, attachment_id) =
+            with_exchange_refresh_token_async(
+                config,
+                &current_token,
+                refresh_token,
+                |access_token| {
+                    let config = config.clone();
+                    let access_token = access_token.to_string();
+                    let entry_id = entry_id.to_string();
+                    let file_name = encrypted.file_name.clone();
+                    let key = encrypted.key.clone();
+                    let data = encrypted.data.clone();
+                    Box::pin(async move {
+                        let client = api_client_for(&config);
+                        client
+                            .upload_attachment_legacy(
+                                &access_token,
+                                &entry_id,
+                                &file_name,
+                                &key,
+                                &data,
+                            )
+                            .await
+                    })
+                },
+            )
+            .await?;
+        if let Some(tok) = legacy_token {
+            updated_token = Some(tok);
+        }
+        return Ok((updated_token, attachment_id));
+    };
+
+    let client = api_client_for(config);
+    let upload_res = match meta.file_upload_type {
+        crate::api::FileUploadType::Direct => {
+            match client
+                .upload_attachment_direct(
+                    &current_token,
+                    entry_id,
+                    &meta.attachment_id,
+                    &meta.url,
+                    &encrypted.file_name,
+                    &encrypted.data,
+                )
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(Error::RequestUnauthorized) => {
+                    match exchange_refresh_token_async(config, refresh_token)
+                        .await
+                    {
+                        Ok(refreshed) => {
+                            current_token.clone_from(&refreshed);
+                            updated_token = Some(refreshed);
+                            client
+                                .upload_attachment_direct(
+                                    &current_token,
+                                    entry_id,
+                                    &meta.attachment_id,
+                                    &meta.url,
+                                    &encrypted.file_name,
+                                    &encrypted.data,
+                                )
+                                .await
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }
+        crate::api::FileUploadType::Azure => {
+            client
+                .upload_attachment_azure(&meta.url, &encrypted.data)
+                .await
+        }
+    };
+
+    if let Err(err) = upload_res {
+        // Best-effort cleanup so failed uploads do not leave orphan metadata.
+        let _ = client
+            .delete_attachment(&current_token, entry_id, &meta.attachment_id)
+            .await;
+        return Err(err);
+    }
+
+    Ok((updated_token, meta.attachment_id))
+}
+
+pub async fn delete_attachment(
+    config: &crate::config::Config,
+    access_token: &str,
+    refresh_token: &str,
+    entry_id: &str,
+    attachment_id: &str,
+) -> Result<(Option<String>, ())> {
+    with_exchange_refresh_token_async(
+        config,
+        access_token,
+        refresh_token,
+        |access_token| {
+            let config = config.clone();
+            let access_token = access_token.to_string();
+            let entry_id = entry_id.to_string();
+            let attachment_id = attachment_id.to_string();
+            Box::pin(async move {
+                let client = api_client_for(&config);
+                client
+                    .delete_attachment(
+                        &access_token,
+                        &entry_id,
+                        &attachment_id,
+                    )
+                    .await
+            })
+        },
+    )
+    .await
+}
+
 pub fn add(
     config: &crate::config::Config,
     access_token: &str,

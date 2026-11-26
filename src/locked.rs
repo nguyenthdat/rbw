@@ -198,3 +198,20 @@ fn test_keys_roundtrip_bytes() {
     assert!(Keys::from_bytes(&raw[0..63]).is_none());
     assert!(Keys::from_bytes(&[0_u8; 65]).is_none());
 }
+
+#[test]
+fn populated_locked_buffers_and_clones_drop_safely() {
+    let expected = (0..64).collect::<std::vec::Vec<u8>>();
+    for _ in 0..16 {
+        let mut original = Vec::new();
+        original.extend(expected.iter().copied());
+        let copies = (0..32)
+            .map(|_| original.clone())
+            .collect::<std::vec::Vec<_>>();
+        drop(original);
+        for copy in copies {
+            assert_eq!(copy.data(), expected);
+            drop(copy);
+        }
+    }
+}

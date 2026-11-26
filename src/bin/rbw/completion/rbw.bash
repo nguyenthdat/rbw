@@ -21,7 +21,7 @@ _rbw_wrapper() {
   if [[ "${COMP_WORDS[1]}" == "get" ]] && [[ $COMP_CWORD -gt 1 ]]; then
     for (( i=2; i < COMP_CWORD; i++ )); do
       case "${COMP_WORDS[i]}" in
-        --folder|-f|--field|-a|--account)
+        --folder|-f|--field|-a|--account|--attachment|--output)
           (( i++ ))
           if [ "${COMP_WORDS[i]}" == "=" ]; then
             (( i++ ))
@@ -69,7 +69,7 @@ _rbw_wrapper() {
         rbw "${account_args[@]}" list --fields folder 2>/dev/null \
           | awk -v folder="$folder" 'NF && $1 ~ folder && !a[$1]++ {print $1}' 2>/dev/null
       )
-    elif [[ "$prev" != --field ]]; then
+    elif [[ "$prev" != --field && "$prev" != --attachment && "$prev" != --output ]]; then
       if [ -z "$name" ]; then
         # rbw get ... $cur
         res=$(
@@ -89,7 +89,7 @@ _rbw_wrapper() {
     fi
 
     if [[ "$cur" == -* ]]; then
-      res="-a --account -f --field --full --raw --clipboard -i --ignorecase -h --help $res"
+      res="-a --account -f --field --full --raw --clipboard -i --ignorecase --attachment --output -h --help $res"
       if [ -z "$folder" ]; then
         res="--folder $res"
       fi

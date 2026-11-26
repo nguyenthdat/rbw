@@ -207,6 +207,57 @@ run `rbw register` to register each device using `rbw` with the Bitwarden
 server. This will prompt you for your personal API key which you can find using
 the instructions [here](https://bitwarden.com/help/article/personal-api-key/).
 
+### Password History & Secure Notes
+
+View password versions in chronological order from oldest (`v1`) to current:
+
+```sh
+rbw history <entry>
+rbw history <entry> --raw
+rbw history <entry> --version 1
+rbw history <entry> --version current --clipboard
+```
+
+Create a new Secure Note via `$EDITOR` or piped `stdin` (piped `stdin` preserves
+leading `#` lines such as Markdown headings):
+
+```sh
+rbw add --note "My Secret Note" --folder personal
+printf '# Runbook\nSecret steps\n' | rbw add --type note "Runbook"
+```
+
+### Attachments
+
+Run `rbw sync` to refresh attachment metadata. List attachments with
+`rbw attachment list <entry>` (or `rbw get <entry> --raw`), upload new files
+(supports both Bitwarden Cloud Azure uploads and Vaultwarden / self-hosted
+Direct uploads), download exact binary files, or remove attachments:
+
+```sh
+# List attachments
+rbw attachment list <entry>
+rbw attachment list <entry> --raw
+
+# Upload an attachment (file path or stdin with --name)
+rbw attachment upload <entry> --file ./document.pdf
+cat secret.key | rbw attachment upload <entry> --file - --name secret.key
+
+# Download an attachment (via `rbw get` or `rbw attachment download`)
+rbw get <entry> --attachment document.pdf --output ./document.pdf
+rbw get <entry> --attachment <attachment-id> --output - > ./document.pdf
+rbw attachment download <entry> --attachment document.pdf --output ./document.pdf
+
+# Remove an attachment
+rbw attachment remove <entry> --attachment document.pdf
+```
+
+Existing username, `--folder`, `--ignorecase`, and `-a/--account` selectors
+apply. Duplicate filenames require an attachment ID. Attachment operations need
+a network connection and honor the entry's master-password reprompt. Downloads
+write exact binary bytes (including empty files) atomically with `0600`
+permissions, never overwrite existing files, and refuse writing binary output
+directly to a terminal.
+
 ### SSH Agent
 
 `rbw-agent` includes a built-in SSH agent for signing SSH authentication

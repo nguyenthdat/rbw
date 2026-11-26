@@ -390,11 +390,14 @@ mod tests {
                     password: Some("2.cipher1|iv|mac".to_string()),
                     totp: None,
                     uris: vec![],
+                    password_revision_date: None,
                 },
                 fields: vec![],
                 notes: None,
                 history: vec![],
                 key: None,
+                attachments: vec![],
+                revision_date: None,
                 master_password_reprompt:
                     rbw::api::CipherRepromptType::Password,
             }]);

@@ -1,10 +1,25 @@
-use std::{fmt::Write as _, io::Write as _, os::unix::ffi::OsStrExt as _};
+use std::{
+    fmt::Write as _,
+    io::{IsTerminal as _, Read as _, Write as _},
+    os::unix::ffi::OsStrExt as _,
+};
 
 use anyhow::Context as _;
 
 // The default number of seconds the generated TOTP
 // code lasts for before a new one must be generated
 const TOTP_DEFAULT_STEP: u64 = 30;
+
+// Bitwarden's maximum unencrypted attachment size (500 MiB)
+const MAX_ATTACHMENT_BYTES: u64 = 500 * 1024 * 1024;
+
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
+pub enum AddEntryType {
+    #[default]
+    Login,
+    #[value(alias = "secure-note", alias = "securenote")]
+    Note,
+}
 
 const MISSING_CONFIG_HELP: &str = "Before using rbw, you must configure the email address you would like to \
     use to log in to the server by running:\n\n    \
@@ -346,6 +361,25 @@ struct DecryptedCipher {
     fields: Vec<DecryptedField>,
     notes: Option<String>,
     history: Vec<DecryptedHistoryEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<DecryptedAttachment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision_date: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize)]
+struct DecryptedAttachment {
+    id: String,
+    file_name: String,
+    size: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, serde::Serialize)]
+struct PasswordVersion {
+    version: usize,
+    current: bool,
+    last_used_date: Option<String>,
+    password: String,
 }
 
 impl DecryptedCipher {
@@ -1028,6 +1062,8 @@ enum DecryptedData {
         password: Option<String>,
         totp: Option<String>,
         uris: Option<Vec<DecryptedUri>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        password_revision_date: Option<String>,
     },
     Card {
         cardholder_name: Option<String>,
@@ -2715,6 +2751,8 @@ pub fn get(
     clipboard: bool,
     ignore_case: bool,
     list_fields: bool,
+    attachment: Option<&str>,
+    output: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let ctx = AccountContext::load(account)?;
     unlock_ctx(&ctx)?;
@@ -2726,6 +2764,21 @@ pub fn get(
         user.map_or_else(String::new, |s| format!("{s}@")),
         needle
     );
+
+    if let Some(attachment) = attachment {
+        let output = output.context("attachment output is required")?;
+        return download_attachment_for_entry(
+            ctx.account_ref(),
+            &db,
+            needle,
+            user,
+            folder,
+            ignore_case,
+            &desc,
+            attachment,
+            output,
+        );
+    }
 
     let (_, decrypted) =
         find_entry(ctx.account_ref(), &db, needle, user, folder, ignore_case)
@@ -2742,6 +2795,407 @@ pub fn get(
         decrypted.display_short(&desc, clipboard);
     }
 
+    Ok(())
+}
+
+pub fn attachment_list(
+    account: Option<&str>,
+    needle: Needle,
+    user: Option<&str>,
+    folder: Option<&str>,
+    ignore_case: bool,
+    raw: bool,
+) -> anyhow::Result<()> {
+    let ctx = AccountContext::load(account)?;
+    unlock_ctx(&ctx)?;
+
+    let db = load_db(&ctx.config)?;
+    let desc = format!(
+        "{}{}",
+        user.map_or_else(String::new, |s| format!("{s}@")),
+        needle
+    );
+    let entry = find_attachment_entry(
+        ctx.account_ref(),
+        &db,
+        needle,
+        user,
+        folder,
+        ignore_case,
+    )
+    .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+    let attachments = decrypt_attachments(ctx.account_ref(), &entry)?;
+
+    if raw {
+        serde_json::to_writer_pretty(std::io::stdout(), &attachments)
+            .context("failed to write attachments to stdout")?;
+        println!();
+    } else {
+        for att in &attachments {
+            println!(
+                "{}\t{}\t{}",
+                att.id,
+                att.file_name,
+                att.size.as_deref().unwrap_or("")
+            );
+        }
+    }
+
+    Ok(())
+}
+
+pub fn attachment_upload(
+    account: Option<&str>,
+    needle: Needle,
+    user: Option<&str>,
+    folder: Option<&str>,
+    ignore_case: bool,
+    file: &std::path::Path,
+    file_name: Option<&str>,
+) -> anyhow::Result<()> {
+    let (resolved_name, bytes) = read_upload_input(file, file_name)?;
+
+    let ctx = AccountContext::load(account)?;
+    unlock_ctx(&ctx)?;
+
+    let db = load_db(&ctx.config)?;
+    let desc = format!(
+        "{}{}",
+        user.map_or_else(String::new, |s| format!("{s}@")),
+        needle
+    );
+    let entry = find_attachment_entry(
+        ctx.account_ref(),
+        &db,
+        needle,
+        user,
+        folder,
+        ignore_case,
+    )
+    .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+
+    let attachment_id = crate::actions::upload_attachment(
+        ctx.account_ref(),
+        &entry.id,
+        &resolved_name,
+        &bytes,
+    )?;
+    drop(bytes);
+
+    crate::actions::sync(ctx.account_ref())?;
+
+    if attachment_id.is_empty() {
+        println!("Uploaded attachment '{resolved_name}'");
+    } else {
+        println!("Uploaded attachment '{resolved_name}' ({attachment_id})");
+    }
+
+    Ok(())
+}
+
+pub fn attachment_download(
+    account: Option<&str>,
+    needle: Needle,
+    user: Option<&str>,
+    folder: Option<&str>,
+    ignore_case: bool,
+    attachment: &str,
+    output: &std::path::Path,
+) -> anyhow::Result<()> {
+    let ctx = AccountContext::load(account)?;
+    unlock_ctx(&ctx)?;
+
+    let db = load_db(&ctx.config)?;
+    let desc = format!(
+        "{}{}",
+        user.map_or_else(String::new, |s| format!("{s}@")),
+        needle
+    );
+    download_attachment_for_entry(
+        ctx.account_ref(),
+        &db,
+        needle,
+        user,
+        folder,
+        ignore_case,
+        &desc,
+        attachment,
+        output,
+    )
+}
+
+pub fn attachment_remove(
+    account: Option<&str>,
+    needle: Needle,
+    user: Option<&str>,
+    folder: Option<&str>,
+    ignore_case: bool,
+    attachment: &str,
+) -> anyhow::Result<()> {
+    let ctx = AccountContext::load(account)?;
+    unlock_ctx(&ctx)?;
+
+    let db = load_db(&ctx.config)?;
+    let desc = format!(
+        "{}{}",
+        user.map_or_else(String::new, |s| format!("{s}@")),
+        needle
+    );
+    let entry = find_attachment_entry(
+        ctx.account_ref(),
+        &db,
+        needle,
+        user,
+        folder,
+        ignore_case,
+    )
+    .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+    let attachment_id =
+        resolve_attachment_id(ctx.account_ref(), &entry, attachment)?;
+
+    crate::actions::delete_attachment(
+        ctx.account_ref(),
+        &entry.id,
+        &attachment_id,
+    )?;
+    crate::actions::sync(ctx.account_ref())?;
+
+    println!("Removed attachment '{attachment_id}'");
+
+    Ok(())
+}
+
+fn download_attachment_for_entry(
+    account: Option<&str>,
+    db: &rbw::db::Db,
+    needle: Needle,
+    user: Option<&str>,
+    folder: Option<&str>,
+    ignore_case: bool,
+    desc: &str,
+    attachment: &str,
+    output: &std::path::Path,
+) -> anyhow::Result<()> {
+    let entry =
+        find_attachment_entry(account, db, needle, user, folder, ignore_case)
+            .with_context(|| format!("couldn't find entry for '{desc}'"))?;
+    let attachment_id = resolve_attachment_id(account, &entry, attachment)?;
+    let bytes = zeroize::Zeroizing::new(crate::actions::download_attachment(
+        account,
+        &entry.id,
+        &attachment_id,
+    )?);
+    write_attachment(&bytes, output)?;
+    Ok(())
+}
+
+fn resolve_attachment_id(
+    account: Option<&str>,
+    entry: &rbw::db::Entry,
+    selector: &str,
+) -> anyhow::Result<String> {
+    // An exact ID needs no cached keys or filename decryption.
+    let mut ids = entry.attachments.iter().filter(|a| a.id == selector);
+    if let Some(selected) = ids.next() {
+        if ids.next().is_some() {
+            anyhow::bail!("ambiguous attachment ID");
+        }
+        return Ok(selected.id.clone());
+    }
+    let attachments = decrypt_attachments(account, entry)?;
+    Ok(select_attachment(&attachments, selector)?.id.clone())
+}
+
+fn select_attachment<'a>(
+    attachments: &'a [DecryptedAttachment],
+    selector: &str,
+) -> anyhow::Result<&'a DecryptedAttachment> {
+    // IDs take precedence over names. Duplicate names must be disambiguated
+    // with an ID rather than silently targeting the wrong file.
+    let by_id: Vec<_> =
+        attachments.iter().filter(|a| a.id == selector).collect();
+    let matches = if by_id.is_empty() {
+        attachments
+            .iter()
+            .filter(|a| a.file_name == selector)
+            .collect()
+    } else {
+        by_id
+    };
+    match matches.as_slice() {
+        [attachment] => Ok(attachment),
+        [] => anyhow::bail!(
+            "attachment not found; use `rbw attachment list` or `rbw get --raw` to list attachment IDs"
+        ),
+        _ => anyhow::bail!(
+            "ambiguous attachment; select a unique attachment ID"
+        ),
+    }
+}
+
+fn find_attachment_entry(
+    account: Option<&str>,
+    db: &rbw::db::Db,
+    mut needle: Needle,
+    username: Option<&str>,
+    folder: Option<&str>,
+    ignore_case: bool,
+) -> anyhow::Result<rbw::db::Entry> {
+    // Entry lookup needs searchable metadata, not unrelated passwords/hidden
+    // fields. The agent enforces the selected entry's reprompt itself.
+    if let Needle::Uuid(uuid, name) = &needle {
+        if let Some(entry) = db
+            .entries
+            .iter()
+            .find(|entry| uuid::Uuid::parse_str(&entry.id) == Ok(*uuid))
+        {
+            return Ok(entry.clone());
+        }
+        needle = Needle::Name(name.clone());
+    }
+    let entries = db
+        .entries
+        .iter()
+        .map(|entry| {
+            decrypt_search_cipher(account, entry)
+                .map(|search| (entry.clone(), search))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let (entry, _) =
+        find_entry_raw(&entries, &needle, username, folder, ignore_case)?;
+    Ok(entry)
+}
+
+fn decrypt_attachments(
+    account: Option<&str>,
+    entry: &rbw::db::Entry,
+) -> anyhow::Result<Vec<DecryptedAttachment>> {
+    entry
+        .attachments
+        .iter()
+        .map(|attachment| {
+            Ok(DecryptedAttachment {
+                id: attachment.id.clone(),
+                file_name: crate::actions::decrypt(
+                    account,
+                    &attachment.file_name,
+                    entry.key.as_deref(),
+                    entry.org_id.as_deref(),
+                )
+                .context("failed to decrypt attachment filename")?,
+                size: attachment.size.clone(),
+            })
+        })
+        .collect()
+}
+
+fn read_upload_input(
+    file: &std::path::Path,
+    file_name: Option<&str>,
+) -> anyhow::Result<(String, zeroize::Zeroizing<Vec<u8>>)> {
+    if let Some(name) = file_name
+        && name.is_empty()
+    {
+        anyhow::bail!("attachment filename cannot be empty");
+    }
+
+    if file == std::path::Path::new("-") {
+        let Some(name) = file_name else {
+            anyhow::bail!(
+                "--name is required when reading attachment data from stdin"
+            );
+        };
+        let mut buf = Vec::new();
+        std::io::stdin()
+            .lock()
+            .take(MAX_ATTACHMENT_BYTES + 1)
+            .read_to_end(&mut buf)
+            .context("failed to read attachment data from stdin")?;
+        if u64::try_from(buf.len()).unwrap_or(u64::MAX) > MAX_ATTACHMENT_BYTES
+        {
+            anyhow::bail!(
+                "attachment exceeds maximum supported size (500 MiB)"
+            );
+        }
+        return Ok((name.to_string(), zeroize::Zeroizing::new(buf)));
+    }
+
+    let metadata = std::fs::metadata(file).with_context(|| {
+        format!("failed to read attachment file '{}'", file.display())
+    })?;
+    if metadata.is_dir() {
+        anyhow::bail!("attachment path '{}' is a directory", file.display());
+    }
+    if metadata.len() > MAX_ATTACHMENT_BYTES {
+        anyhow::bail!("attachment exceeds maximum supported size (500 MiB)");
+    }
+
+    let resolved_name = if let Some(name) = file_name {
+        name.to_string()
+    } else {
+        file.file_name()
+            .and_then(|n| n.to_str())
+            .filter(|s| !s.is_empty())
+            .map(std::string::ToString::to_string)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not determine valid UTF-8 filename from '{}'; specify --name",
+                    file.display()
+                )
+            })?
+    };
+
+    let fh = std::fs::File::open(file).with_context(|| {
+        format!("failed to open attachment file '{}'", file.display())
+    })?;
+    let mut buf = Vec::new();
+    fh.take(MAX_ATTACHMENT_BYTES + 1)
+        .read_to_end(&mut buf)
+        .with_context(|| {
+            format!("failed to read attachment file '{}'", file.display())
+        })?;
+    if u64::try_from(buf.len()).unwrap_or(u64::MAX) > MAX_ATTACHMENT_BYTES {
+        anyhow::bail!("attachment exceeds maximum supported size (500 MiB)");
+    }
+
+    Ok((resolved_name, zeroize::Zeroizing::new(buf)))
+}
+
+fn write_attachment(
+    bytes: &[u8],
+    output: &std::path::Path,
+) -> anyhow::Result<()> {
+    if output == std::path::Path::new("-") {
+        let mut stdout = std::io::stdout().lock();
+        if stdout.is_terminal() {
+            anyhow::bail!(
+                "refusing to write a binary attachment to the terminal; use --output FILE or redirect stdout"
+            );
+        }
+        stdout
+            .write_all(bytes)
+            .context("failed to write attachment to stdout")?;
+        stdout
+            .flush()
+            .context("failed to flush attachment to stdout")?;
+        return Ok(());
+    }
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut file = tempfile::NamedTempFile::new_in(parent)
+        .context("failed to create private attachment output")?;
+    file.write_all(bytes)
+        .context("failed to write attachment")?;
+    file.as_file()
+        .sync_all()
+        .context("failed to flush attachment")?;
+    // Authentication/decryption finish before creating a file. Publish it
+    // atomically without overwriting existing files, symlinks or directories.
+    file.persist_noclobber(output).context(
+        "failed to save attachment (output must not already exist)",
+    )?;
     Ok(())
 }
 
@@ -2886,7 +3340,14 @@ pub fn add(
     username: Option<&str>,
     uris: &[(String, Option<rbw::api::UriMatchType>)],
     folder: Option<&str>,
+    entry_type: AddEntryType,
 ) -> anyhow::Result<()> {
+    if entry_type == AddEntryType::Note
+        && (username.is_some() || !uris.is_empty())
+    {
+        anyhow::bail!("username and --uri are only valid for login entries");
+    }
+
     let ctx = AccountContext::load(account)?;
     unlock_ctx(&ctx)?;
 
@@ -2898,36 +3359,66 @@ pub fn add(
 
     let name = crate::actions::encrypt(ctx.account_ref(), name, None)?;
 
-    let username = username
-        .map(|username| {
-            crate::actions::encrypt(ctx.account_ref(), username, None)
-        })
-        .transpose()?;
+    let (entry_data, notes) = match entry_type {
+        AddEntryType::Login => {
+            let username = username
+                .map(|username| {
+                    crate::actions::encrypt(ctx.account_ref(), username, None)
+                })
+                .transpose()?;
 
-    let contents = rbw::edit::edit("", HELP_PW)?;
+            let contents = rbw::edit::edit("", HELP_PW)?;
 
-    let (password, notes) = parse_editor(&contents);
-    let password = password
-        .map(|password| {
-            crate::actions::encrypt(ctx.account_ref(), &password, None)
-        })
-        .transpose()?;
-    let notes = notes
-        .map(|notes| crate::actions::encrypt(ctx.account_ref(), &notes, None))
-        .transpose()?;
-    let uris: Vec<_> = uris
-        .iter()
-        .map(|uri| {
-            Ok(rbw::db::Uri {
-                uri: crate::actions::encrypt(
-                    ctx.account_ref(),
-                    &uri.0,
-                    None,
-                )?,
-                match_type: uri.1,
-            })
-        })
-        .collect::<anyhow::Result<_>>()?;
+            let (password, notes) = parse_editor(&contents);
+            let password = password
+                .map(|password| {
+                    crate::actions::encrypt(
+                        ctx.account_ref(),
+                        &password,
+                        None,
+                    )
+                })
+                .transpose()?;
+            let notes = notes
+                .map(|notes| {
+                    crate::actions::encrypt(ctx.account_ref(), &notes, None)
+                })
+                .transpose()?;
+            let uris: Vec<_> = uris
+                .iter()
+                .map(|uri| {
+                    Ok(rbw::db::Uri {
+                        uri: crate::actions::encrypt(
+                            ctx.account_ref(),
+                            &uri.0,
+                            None,
+                        )?,
+                        match_type: uri.1,
+                    })
+                })
+                .collect::<anyhow::Result<_>>()?;
+            (
+                rbw::db::EntryData::Login {
+                    username,
+                    password,
+                    uris,
+                    totp: None,
+                    password_revision_date: None,
+                },
+                notes,
+            )
+        }
+        AddEntryType::Note => {
+            let is_tty = std::io::stdin().is_terminal();
+            let contents = rbw::edit::edit("", HELP_NOTES)?;
+            let notes = parse_note_editor(&contents, is_tty)
+                .map(|notes| {
+                    crate::actions::encrypt(ctx.account_ref(), &notes, None)
+                })
+                .transpose()?;
+            (rbw::db::EntryData::SecureNote, notes)
+        }
+    };
 
     let mut folder_id = None;
     if let Some(folder_name) = folder {
@@ -2988,12 +3479,7 @@ pub fn add(
         &access_token,
         refresh_token,
         &name,
-        &rbw::db::EntryData::Login {
-            username,
-            password,
-            uris,
-            totp: None,
-        },
+        &entry_data,
         notes.as_deref(),
         folder_id.as_deref(),
     )? {
@@ -3114,6 +3600,7 @@ pub fn generate(
                 password: Some(password),
                 uris,
                 totp: None,
+                password_revision_date: None,
             },
             None,
             folder_id.as_deref(),
@@ -3159,17 +3646,22 @@ pub fn edit(
     .with_context(|| format!("couldn't find entry for '{desc}'"))?;
 
     let (data, fields, notes, history) = match &decrypted.data {
-        DecryptedData::Login { password, .. } => {
+        DecryptedData::Login {
+            password: prev_plain_password,
+            ..
+        } => {
             let mut contents =
-                format!("{}\n", password.as_deref().unwrap_or(""));
+                format!("{}\n", prev_plain_password.as_deref().unwrap_or(""));
             if let Some(notes) = decrypted.notes {
                 write!(contents, "\n{notes}\n").unwrap();
             }
 
             let contents = rbw::edit::edit(&contents, HELP_PW)?;
 
-            let (password, notes) = parse_editor(&contents);
-            let password = password
+            let (new_plain_password, notes) = parse_editor(&contents);
+            let password_changed = prev_plain_password.as_deref()
+                != new_plain_password.as_deref();
+            let password = new_plain_password
                 .map(|password| {
                     crate::actions::encrypt(
                         ctx.account_ref(),
@@ -3193,45 +3685,49 @@ pub fn edit(
                 password: entry_password,
                 uris: entry_uris,
                 totp: entry_totp,
+                password_revision_date: entry_password_revision_date,
             } = &entry.data
             else {
                 unreachable!();
             };
 
-            if let Some(prev_password) = entry_password.clone() {
-                let new_history_entry = rbw::db::HistoryEntry {
-                    last_used_date: format!(
-                        "{}",
-                        humantime::format_rfc3339(
-                            std::time::SystemTime::now()
-                        )
-                    ),
-                    password: prev_password,
-                };
-                history.insert(0, new_history_entry);
-            }
+            let password_revision_date = if password_changed {
+                let now = format!(
+                    "{}",
+                    humantime::format_rfc3339(std::time::SystemTime::now())
+                );
+                if let Some(prev_password) = entry_password.clone() {
+                    let new_history_entry = rbw::db::HistoryEntry {
+                        last_used_date: now.clone(),
+                        password: prev_password,
+                    };
+                    history.insert(0, new_history_entry);
+                }
+                Some(now)
+            } else {
+                entry_password_revision_date.clone()
+            };
 
             let data = rbw::db::EntryData::Login {
                 username: entry_username.clone(),
                 password,
                 uris: entry_uris.clone(),
                 totp: entry_totp.clone(),
+                password_revision_date,
             };
             (data, entry.fields, notes, history)
         }
         DecryptedData::SecureNote => {
             let data = rbw::db::EntryData::SecureNote {};
 
+            let is_tty = std::io::stdin().is_terminal();
             let editor_content = decrypted.notes.map_or_else(
                 || "\n".to_string(),
                 |notes| format!("{notes}\n"),
             );
             let contents = rbw::edit::edit(&editor_content, HELP_NOTES)?;
 
-            // prepend blank line to be parsed as pw by `parse_editor`
-            let (_, notes) = parse_editor(&format!("\n{contents}\n"));
-
-            let notes = notes
+            let notes = parse_note_editor(&contents, is_tty)
                 .map(|notes| {
                     crate::actions::encrypt(
                         ctx.account_ref(),
@@ -3322,6 +3818,9 @@ pub fn history(
     username: Option<&str>,
     folder: Option<&str>,
     ignore_case: bool,
+    version: Option<&str>,
+    raw: bool,
+    clipboard: bool,
 ) -> anyhow::Result<()> {
     let ctx = AccountContext::load(account)?;
     unlock_ctx(&ctx)?;
@@ -3343,11 +3842,236 @@ pub fn history(
         ignore_case,
     )
     .with_context(|| format!("couldn't find entry for '{desc}'"))?;
-    for history in decrypted.history {
-        println!("{}: {}", history.last_used_date, history.password);
+
+    let versions = build_password_versions(&decrypted);
+    if versions.is_empty() {
+        if !matches!(decrypted.data, DecryptedData::Login { .. }) {
+            anyhow::bail!(
+                "entry '{desc}' is not a login entry and has no password history"
+            );
+        }
+        if version.is_some() {
+            anyhow::bail!("entry '{desc}' has no password versions");
+        }
+        if raw {
+            println!("[]");
+        } else {
+            eprintln!(
+                "entry for '{desc}' had no password or password history"
+            );
+        }
+        return Ok(());
+    }
+
+    if let Some(selector) = version {
+        let selected = select_password_version(&versions, selector)?;
+        if raw {
+            serde_json::to_writer_pretty(std::io::stdout(), selected)
+                .context("failed to write password version to stdout")?;
+            println!();
+        } else {
+            val_display_or_store(clipboard, &selected.password);
+        }
+        return Ok(());
+    }
+
+    if raw {
+        serde_json::to_writer_pretty(std::io::stdout(), &versions)
+            .context("failed to write password history to stdout")?;
+        println!();
+    } else {
+        for v in &versions {
+            println!("{}", format_password_version(v));
+        }
     }
 
     Ok(())
+}
+
+fn build_password_versions(
+    decrypted: &DecryptedCipher,
+) -> Vec<PasswordVersion> {
+    // Bitwarden stores passwordHistory newest-first. Sort ascending by
+    // timestamp (breaking ties / unparseable timestamps by reversing the
+    // original order) so v1 is the oldest password and the last item is the
+    // current password.
+    let mut historical: Vec<(
+        usize,
+        Option<(i64, u32)>,
+        &DecryptedHistoryEntry,
+    )> = decrypted
+        .history
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let parsed = parse_rfc3339_timestamp(&item.last_used_date);
+            (idx, parsed, item)
+        })
+        .collect();
+    historical.sort_by(|(idx_a, ts_a, _), (idx_b, ts_b, _)| {
+        match (ts_a, ts_b) {
+            (Some(a), Some(b)) => a.cmp(b).then_with(|| idx_b.cmp(idx_a)),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => idx_b.cmp(idx_a),
+        }
+    });
+
+    let mut versions: Vec<PasswordVersion> = historical
+        .into_iter()
+        .enumerate()
+        .map(|(i, (_, _, item))| PasswordVersion {
+            version: i + 1,
+            current: false,
+            last_used_date: Some(item.last_used_date.clone()),
+            password: item.password.clone(),
+        })
+        .collect();
+
+    if let DecryptedData::Login {
+        password: Some(current_password),
+        password_revision_date,
+        ..
+    } = &decrypted.data
+    {
+        versions.push(PasswordVersion {
+            version: versions.len() + 1,
+            current: true,
+            last_used_date: password_revision_date
+                .clone()
+                .or_else(|| decrypted.revision_date.clone()),
+            password: current_password.clone(),
+        });
+    }
+
+    versions
+}
+
+/// Parse an RFC 3339 timestamp (`YYYY-MM-DD[T|t| ]HH:MM:SS[.frac](Z|±HH:MM)`)
+/// into `(utc_epoch_seconds, nanoseconds)` for accurate chronological sorting.
+fn parse_rfc3339_timestamp(s: &str) -> Option<(i64, u32)> {
+    let s = s.trim();
+    if s.len() < 20 {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !matches!(bytes[10], b'T' | b't' | b' ')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let year: i64 = s.get(0..4)?.parse().ok()?;
+    let month: u32 = s.get(5..7)?.parse().ok()?;
+    let day: u32 = s.get(8..10)?.parse().ok()?;
+    let hour: u32 = s.get(11..13)?.parse().ok()?;
+    let minute: u32 = s.get(14..16)?.parse().ok()?;
+    let second: u32 = s.get(17..19)?.parse().ok()?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+
+    let mut rest = s.get(19..)?;
+    let mut nanos: u32 = 0;
+    if let Some(after_dot) = rest.strip_prefix('.') {
+        let frac_len =
+            after_dot.bytes().take_while(u8::is_ascii_digit).count();
+        if frac_len == 0 {
+            return None;
+        }
+        let frac = &after_dot[..frac_len];
+        let mut scale = 100_000_000_u32;
+        for b in frac.bytes().take(9) {
+            nanos += u32::from(b - b'0') * scale;
+            scale /= 10;
+        }
+        rest = &after_dot[frac_len..];
+    }
+
+    let offset_secs: i64 = match rest {
+        "Z" | "z" => 0,
+        _ if rest.len() == 6 => {
+            let sign: i64 = match rest.as_bytes()[0] {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            if rest.as_bytes()[3] != b':' {
+                return None;
+            }
+            let off_h: i64 = rest.get(1..3)?.parse().ok()?;
+            let off_m: i64 = rest.get(4..6)?.parse().ok()?;
+            if off_h > 23 || off_m > 59 {
+                return None;
+            }
+            sign * (off_h * 3600 + off_m * 60)
+        }
+        _ => return None,
+    };
+
+    // Howard Hinnant's days-from-civil algorithm (days since 1970-01-01)
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let m = i64::from(month);
+    let d = i64::from(day);
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+
+    let secs = days * 86_400
+        + i64::from(hour) * 3600
+        + i64::from(minute) * 60
+        + i64::from(second)
+        - offset_secs;
+    Some((secs, nanos))
+}
+
+fn select_password_version<'a>(
+    versions: &'a [PasswordVersion],
+    selector: &str,
+) -> anyhow::Result<&'a PasswordVersion> {
+    let normalized = selector.trim().to_ascii_lowercase();
+    if normalized == "current" || normalized == "latest" {
+        return versions
+            .iter()
+            .find(|v| v.current)
+            .ok_or_else(|| anyhow::anyhow!("entry has no current password"));
+    }
+    let digits = normalized.strip_prefix('v').unwrap_or(&normalized);
+    let num: usize = digits.parse().map_err(|_| {
+        anyhow::anyhow!(
+            "invalid version '{selector}' (expected 1..={}, vN, or current)",
+            versions.len()
+        )
+    })?;
+    if num == 0 || num > versions.len() {
+        anyhow::bail!(
+            "version {num} out of range (valid: 1..={})",
+            versions.len()
+        );
+    }
+    Ok(&versions[num - 1])
+}
+
+fn format_password_version(v: &PasswordVersion) -> String {
+    match (v.current, v.last_used_date.as_deref()) {
+        (true, Some(date)) => {
+            format!("v{} [current] ({date}): {}", v.version, v.password)
+        }
+        (true, None) => format!("v{} [current]: {}", v.version, v.password),
+        (false, Some(date)) => {
+            format!("v{} ({date}): {}", v.version, v.password)
+        }
+        (false, None) => format!("v{}: {}", v.version, v.password),
+    }
 }
 
 pub fn lock(account: Option<&str>, all: bool) -> anyhow::Result<()> {
@@ -3883,6 +4607,7 @@ fn decrypt_cipher(
             password,
             totp,
             uris,
+            password_revision_date,
         } => DecryptedData::Login {
             username: decrypt_field(
                 account,
@@ -3921,6 +4646,7 @@ fn decrypt_cipher(
                     })
                 })
                 .collect(),
+            password_revision_date: password_revision_date.clone(),
         },
         rbw::db::EntryData::Card {
             cardholder_name,
@@ -4155,6 +4881,8 @@ fn decrypt_cipher(
         fields,
         notes,
         history,
+        attachments: decrypt_attachments(account, entry)?,
+        revision_date: entry.revision_date.clone(),
     })
 }
 
@@ -4177,6 +4905,21 @@ fn parse_editor(contents: &str) -> (Option<String>, Option<String>) {
     let notes = if notes.is_empty() { None } else { Some(notes) };
 
     (password, notes)
+}
+
+fn parse_note_editor(contents: &str, strip_comments: bool) -> Option<String> {
+    let mut notes: String = contents
+        .lines()
+        .filter(|line| !strip_comments || !line.starts_with('#'))
+        .fold(String::new(), |mut notes, line| {
+            notes.push_str(line);
+            notes.push('\n');
+            notes
+        });
+    while notes.ends_with('\n') {
+        notes.pop();
+    }
+    if notes.is_empty() { None } else { Some(notes) }
 }
 
 fn load_db(config: &rbw::config::Config) -> anyhow::Result<rbw::db::Db> {
@@ -5702,11 +6445,14 @@ mod test {
                         })
                         .collect(),
                     totp: None,
+                    password_revision_date: None,
                 },
                 fields: vec![],
                 notes: None,
                 history: vec![],
                 key: None,
+                attachments: vec![],
+                revision_date: None,
                 master_password_reprompt: rbw::api::CipherRepromptType::None,
             },
             DecryptedSearchCipher {
@@ -5725,5 +6471,264 @@ mod test {
                 notes: None,
             },
         )
+    }
+
+    #[test]
+    fn test_password_versions_chronological_and_selection() {
+        let cipher = DecryptedCipher {
+            id: "1".to_string(),
+            folder: None,
+            name: "github".to_string(),
+            data: DecryptedData::Login {
+                username: Some("alice".to_string()),
+                password: Some("pw-current".to_string()),
+                totp: None,
+                uris: None,
+                password_revision_date: Some(
+                    "2026-10-01T10:00:00Z".to_string(),
+                ),
+            },
+            fields: vec![],
+            notes: None,
+            // Bitwarden stores history newest-first
+            history: vec![
+                DecryptedHistoryEntry {
+                    last_used_date: "2025-06-01T00:00:00Z".to_string(),
+                    password: "pw-2".to_string(),
+                },
+                DecryptedHistoryEntry {
+                    last_used_date: "2024-01-15T12:00:00+07:00".to_string(),
+                    password: "pw-1".to_string(),
+                },
+            ],
+            attachments: vec![],
+            revision_date: Some("2026-11-01T00:00:00Z".to_string()),
+        };
+
+        let versions = build_password_versions(&cipher);
+        assert_eq!(versions.len(), 3);
+        assert_eq!(versions[0].version, 1);
+        assert!(!versions[0].current);
+        assert_eq!(versions[0].password, "pw-1");
+        assert_eq!(versions[1].version, 2);
+        assert!(!versions[1].current);
+        assert_eq!(versions[1].password, "pw-2");
+        assert_eq!(versions[2].version, 3);
+        assert!(versions[2].current);
+        assert_eq!(versions[2].password, "pw-current");
+        assert_eq!(
+            versions[2].last_used_date.as_deref(),
+            Some("2026-10-01T10:00:00Z")
+        );
+
+        assert_eq!(
+            format_password_version(&versions[0]),
+            "v1 (2024-01-15T12:00:00+07:00): pw-1"
+        );
+        assert_eq!(
+            format_password_version(&versions[2]),
+            "v3 [current] (2026-10-01T10:00:00Z): pw-current"
+        );
+
+        assert_eq!(
+            select_password_version(&versions, "1").unwrap().password,
+            "pw-1"
+        );
+        assert_eq!(
+            select_password_version(&versions, "v2").unwrap().password,
+            "pw-2"
+        );
+        assert_eq!(
+            select_password_version(&versions, "V3").unwrap().password,
+            "pw-current"
+        );
+        assert_eq!(
+            select_password_version(&versions, "current")
+                .unwrap()
+                .password,
+            "pw-current"
+        );
+        assert_eq!(
+            select_password_version(&versions, "latest")
+                .unwrap()
+                .password,
+            "pw-current"
+        );
+        assert!(select_password_version(&versions, "0").is_err());
+        assert!(select_password_version(&versions, "4").is_err());
+        assert!(select_password_version(&versions, "bogus").is_err());
+    }
+
+    #[test]
+    fn test_password_versions_no_history_falls_back_to_revision_date() {
+        let cipher = DecryptedCipher {
+            id: "2".to_string(),
+            folder: None,
+            name: "service".to_string(),
+            data: DecryptedData::Login {
+                username: None,
+                password: Some("only-pw".to_string()),
+                totp: None,
+                uris: None,
+                password_revision_date: None,
+            },
+            fields: vec![],
+            notes: None,
+            history: vec![],
+            attachments: vec![],
+            revision_date: None,
+        };
+        let versions = build_password_versions(&cipher);
+        assert_eq!(versions.len(), 1);
+        assert!(versions[0].current);
+        assert_eq!(
+            format_password_version(&versions[0]),
+            "v1 [current]: only-pw"
+        );
+    }
+
+    #[test]
+    fn test_parse_note_editor_interactive_vs_piped() {
+        let input = "# Heading\nline 1\n# comment\nline 2\n\n";
+        assert_eq!(
+            parse_note_editor(input, true).as_deref(),
+            Some("line 1\nline 2")
+        );
+        assert_eq!(
+            parse_note_editor(input, false).as_deref(),
+            Some("# Heading\nline 1\n# comment\nline 2")
+        );
+        assert_eq!(parse_note_editor("# only comment\n", true), None);
+        assert_eq!(parse_note_editor("\n\n", false), None);
+    }
+
+    #[test]
+    fn test_parse_rfc3339_timestamp_offsets_and_fractions() {
+        assert_eq!(
+            parse_rfc3339_timestamp("1970-01-01T00:00:00Z"),
+            Some((0, 0))
+        );
+        assert_eq!(
+            parse_rfc3339_timestamp("2025-01-01T00:00:00.1234567Z"),
+            parse_rfc3339_timestamp("2025-01-01T07:00:00.1234567+07:00")
+        );
+        assert_eq!(
+            parse_rfc3339_timestamp("2024-02-29T00:00:00Z"),
+            Some((1_709_164_800, 0))
+        );
+        assert!(
+            parse_rfc3339_timestamp("2025-01-01T00:00:00-05:00")
+                > parse_rfc3339_timestamp("2025-01-01T00:00:00Z")
+        );
+        assert_eq!(parse_rfc3339_timestamp("not-a-timestamp"), None);
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn attachment(id: &str, name: &str) -> DecryptedAttachment {
+        DecryptedAttachment {
+            id: id.to_string(),
+            file_name: name.to_string(),
+            size: None,
+        }
+    }
+
+    #[test]
+    fn exact_name_or_id_selection_is_unambiguous() {
+        let files = vec![
+            attachment("one", "file.bin"),
+            attachment("two", "file.bin"),
+            attachment("file.bin", "../other"),
+        ];
+        assert_eq!(
+            select_attachment(&files, "file.bin").unwrap().id,
+            "file.bin"
+        );
+        assert_eq!(
+            select_attachment(&files, "../other").unwrap().id,
+            "file.bin"
+        );
+        assert!(select_attachment(&files[..2], "file.bin").is_err());
+        assert!(select_attachment(&files, "missing").is_err());
+        assert!(
+            select_attachment(
+                &[attachment("one", "a"), attachment("one", "b")],
+                "one"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            select_attachment(
+                &[attachment("id", "日本語.bin")],
+                "日本語.bin"
+            )
+            .unwrap()
+            .id,
+            "id"
+        );
+    }
+
+    #[test]
+    fn binary_and_empty_outputs_are_exact_private_and_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in [
+            ("binary", &[0, 255, 128, 10, 13, 0][..]),
+            ("empty", &[][..]),
+        ] {
+            let path = dir.path().join(name);
+            write_attachment(bytes, &path).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode()
+                    & 0o777,
+                0o600
+            );
+            assert!(write_attachment(b"replacement", &path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn symlinks_directories_and_missing_parents_are_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        std::fs::write(&original, b"keep").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&original, &link).unwrap();
+        assert!(write_attachment(b"replace", &link).is_err());
+        assert_eq!(std::fs::read(&original).unwrap(), b"keep");
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert!(write_attachment(b"replace", dir.path()).is_err());
+        assert!(
+            write_attachment(b"replace", &dir.path().join("absent/file"))
+                .is_err()
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn read_upload_input_validates_files_names_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let sample = dir.path().join("sample.bin");
+        let payload = [0_u8, 1, 255, 10, 13];
+        std::fs::write(&sample, payload).unwrap();
+
+        let (name, bytes) = read_upload_input(&sample, None).unwrap();
+        assert_eq!(name, "sample.bin");
+        assert_eq!(bytes.as_slice(), &payload);
+
+        let (name, bytes) =
+            read_upload_input(&sample, Some("custom.dat")).unwrap();
+        assert_eq!(name, "custom.dat");
+        assert_eq!(bytes.as_slice(), &payload);
+
+        assert!(read_upload_input(&sample, Some("")).is_err());
+        assert!(read_upload_input(dir.path(), None).is_err());
+        assert!(read_upload_input(std::path::Path::new("-"), None).is_err());
     }
 }

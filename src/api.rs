@@ -521,6 +521,10 @@ struct SyncResCipher {
     deleted_date: Option<String>,
     #[serde(rename = "Key", alias = "key")]
     key: Option<String>,
+    #[serde(rename = "Attachments", alias = "attachments")]
+    attachments: Option<Vec<crate::attachment::Attachment>>,
+    #[serde(rename = "RevisionDate", alias = "revisionDate")]
+    revision_date: Option<String>,
     #[serde(rename = "Reprompt", alias = "reprompt")]
     reprompt: CipherRepromptType,
 }
@@ -582,6 +586,7 @@ impl SyncResCipher {
                             .collect()
                     },
                 ),
+                password_revision_date: login.password_revision_date.clone(),
             }
         } else if let Some(card) = &self.card {
             crate::db::EntryData::Card {
@@ -645,6 +650,8 @@ impl SyncResCipher {
             notes: self.notes.clone(),
             history,
             key: self.key.clone(),
+            attachments: self.attachments.clone().unwrap_or_default(),
+            revision_date: self.revision_date.clone(),
             master_password_reprompt: self.reprompt,
         })
     }
@@ -686,6 +693,13 @@ struct CipherLogin {
     totp: Option<String>,
     #[serde(rename = "Uris", alias = "uris")]
     uris: Option<Vec<CipherLoginUri>>,
+    #[serde(
+        rename = "PasswordRevisionDate",
+        alias = "passwordRevisionDate",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    password_revision_date: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -829,10 +843,45 @@ struct CipherField {
     linked_id: Option<LinkedIdType>,
 }
 
-// this is just a name and some notes, both of which are already on the cipher
-// object
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-struct CipherSecureNote {}
+// Generic secure note subtype is 0 in Bitwarden/Vaultwarden APIs.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+struct CipherSecureNote {
+    #[serde(rename = "type", alias = "Type", default)]
+    ty: u32,
+}
+
+#[derive(
+    serde_repr::Serialize_repr,
+    serde_repr::Deserialize_repr,
+    Debug,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+)]
+#[repr(u8)]
+pub enum FileUploadType {
+    Direct = 0,
+    Azure = 1,
+}
+
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct AttachmentV2Req {
+    file_name: String,
+    file_size: u64,
+    key: String,
+}
+
+#[derive(serde::Deserialize, Debug, Clone)]
+pub struct AttachmentUploadData {
+    #[serde(rename = "AttachmentId", alias = "attachmentId")]
+    pub attachment_id: String,
+    #[serde(rename = "Url", alias = "url", default)]
+    pub url: String,
+    #[serde(rename = "FileUploadType", alias = "fileUploadType")]
+    pub file_upload_type: FileUploadType,
+}
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct SyncResPasswordHistory {
@@ -936,6 +985,14 @@ impl Client {
     }
 
     async fn reqwest_client(&self) -> Result<reqwest::Client> {
+        self.reqwest_client_with_redirect(reqwest::redirect::Policy::default())
+            .await
+    }
+
+    async fn reqwest_client_with_redirect(
+        &self,
+        redirect: reqwest::redirect::Policy,
+    ) -> Result<reqwest::Client> {
         let mut default_headers = axum::http::HeaderMap::new();
         default_headers.insert(
             "Bitwarden-Client-Name",
@@ -976,12 +1033,14 @@ impl Client {
             Ok(reqwest::Client::builder()
                 .user_agent(user_agent)
                 .identity(pem)
+                .redirect(redirect)
                 .default_headers(default_headers)
                 .build()
                 .map_err(|e| Error::CreateReqwestClient { source: e })?)
         } else {
             Ok(reqwest::Client::builder()
                 .user_agent(user_agent)
+                .redirect(redirect)
                 .default_headers(default_headers)
                 .build()
                 .map_err(|e| Error::CreateReqwestClient { source: e })?)
@@ -1377,6 +1436,544 @@ impl Client {
         }
     }
 
+    /// Fetch fresh cipher metadata from the server, rather than trusting the
+    /// editable local cache for ownership, encryption keys, or reprompt state.
+    pub async fn get_cipher(
+        &self,
+        access_token: &str,
+        entry_id: &str,
+    ) -> Result<crate::db::Entry> {
+        validate_path_id(entry_id)?;
+        let entry_path = encode_path_segment(entry_id);
+        let client = self.reqwest_client().await?;
+        let res = client
+            .get(self.api_url(&format!("/ciphers/{entry_path}")))
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|source| Error::Reqwest { source })?;
+        match res.status() {
+            reqwest::StatusCode::OK => {}
+            reqwest::StatusCode::UNAUTHORIZED => {
+                return Err(Error::RequestUnauthorized);
+            }
+            status => {
+                return Err(Error::RequestFailed {
+                    status: status.as_u16(),
+                });
+            }
+        }
+        let cipher: SyncResCipher = res.json_with_path().await?;
+        let entry =
+            cipher
+                .to_entry(&[])
+                .ok_or_else(|| Error::InvalidAttachment {
+                    reason: "entry is deleted or unsupported".to_string(),
+                })?;
+        if entry.id != entry_id {
+            return Err(Error::InvalidAttachment {
+                reason: "server returned a different entry".to_string(),
+            });
+        }
+        Ok(entry)
+    }
+
+    /// Fetch attachment metadata from the server, rather than trusting the
+    /// editable local cache for the owning entry, encryption keys or reprompt.
+    pub async fn attachment(
+        &self,
+        access_token: &str,
+        entry_id: &str,
+        attachment_id: &str,
+    ) -> Result<(crate::db::Entry, crate::attachment::Attachment)> {
+        validate_path_id(entry_id)?;
+        validate_path_id(attachment_id)?;
+        let entry = self.get_cipher(access_token, entry_id).await?;
+        let mut matches =
+            entry.attachments.iter().filter(|a| a.id == attachment_id);
+        let mut attachment = matches.next().cloned().ok_or_else(|| {
+            Error::InvalidAttachment {
+                reason: "attachment not found in this entry".to_string(),
+            }
+        })?;
+        if matches.next().is_some() {
+            return Err(Error::InvalidAttachment {
+                reason: "ambiguous attachment ID".to_string(),
+            });
+        }
+
+        let entry_path = encode_path_segment(entry_id);
+        let attachment_path = encode_path_segment(attachment_id);
+        let client = self.reqwest_client().await?;
+        // The URL in /sync may have expired. Modern servers issue a fresh
+        // download URL here. Only a 404 permits the legacy metadata fallback.
+        let res = client
+            .get(self.api_url(&format!(
+                "/ciphers/{entry_path}/attachment/{attachment_path}"
+            )))
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|source| Error::Reqwest { source })?;
+        match res.status() {
+            reqwest::StatusCode::OK => {
+                let fresh: crate::attachment::Attachment =
+                    res.json_with_path().await?;
+                if fresh.id != attachment_id {
+                    return Err(Error::InvalidAttachment {
+                        reason: "server returned a different attachment"
+                            .to_string(),
+                    });
+                }
+                attachment.url = fresh.url;
+            }
+            reqwest::StatusCode::NOT_FOUND => {}
+            reqwest::StatusCode::UNAUTHORIZED => {
+                return Err(Error::RequestUnauthorized);
+            }
+            status => {
+                return Err(Error::RequestFailed {
+                    status: status.as_u16(),
+                });
+            }
+        }
+        Ok((entry, attachment))
+    }
+
+    /// Fetch only the encrypted blob. Never forward a vault access token to
+    /// the attachment host, including when it is the same host as the API.
+    pub async fn attachment_bytes(
+        &self,
+        attachment: &crate::attachment::Attachment,
+    ) -> Result<Vec<u8>> {
+        let mut url = reqwest::Url::parse(&attachment.url).map_err(|_| {
+            Error::InvalidAttachment {
+                reason: "invalid download URL".to_string(),
+            }
+        })?;
+        let base = reqwest::Url::parse(&self.base_url).map_err(|_| {
+            Error::InvalidAttachment {
+                reason: "invalid server URL".to_string(),
+            }
+        })?;
+        for _ in 0..10 {
+            validate_blob_url(&url, &base, "unsupported download URL")?;
+            // Handle redirects here so client certificates are used only for
+            // the configured API origin. No request carries a vault bearer.
+            let client = if url.origin() == base.origin() {
+                self.reqwest_client_with_redirect(
+                    reqwest::redirect::Policy::none(),
+                )
+                .await?
+            } else {
+                reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|source| Error::CreateReqwestClient { source })?
+            };
+            let res =
+                client.get(url.clone()).send().await.map_err(|source| {
+                    Error::Reqwest {
+                        source: source.without_url(),
+                    }
+                })?;
+            if res.status().is_redirection() {
+                let location = res
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or_else(|| Error::InvalidAttachment {
+                        reason: "download redirect has no valid location"
+                            .to_string(),
+                    })?;
+                url = url.join(location).map_err(|_| {
+                    Error::InvalidAttachment {
+                        reason: "invalid download redirect".to_string(),
+                    }
+                })?;
+                continue;
+            }
+            if res.status() != reqwest::StatusCode::OK {
+                return Err(Error::RequestFailed {
+                    status: res.status().as_u16(),
+                });
+            }
+            return Ok(res
+                .bytes()
+                .await
+                .map_err(|source| Error::Reqwest {
+                    source: source.without_url(),
+                })?
+                .to_vec());
+        }
+        Err(Error::InvalidAttachment {
+            reason: "too many download redirects".to_string(),
+        })
+    }
+
+    /// Reserve a v2 attachment upload slot (`POST /ciphers/{id}/attachment/v2`).
+    /// Returns `Ok(None)` if the server responds with 404 (legacy server).
+    pub async fn upload_attachment_v2_metadata(
+        &self,
+        access_token: &str,
+        entry_id: &str,
+        encrypted_file_name: &str,
+        encrypted_size: u64,
+        encrypted_key: &str,
+    ) -> Result<Option<AttachmentUploadData>> {
+        validate_path_id(entry_id)?;
+        let entry_path = encode_path_segment(entry_id);
+        let req = AttachmentV2Req {
+            file_name: encrypted_file_name.to_string(),
+            file_size: encrypted_size,
+            key: encrypted_key.to_string(),
+        };
+        let client = self.reqwest_client().await?;
+        let res = client
+            .post(
+                self.api_url(&format!("/ciphers/{entry_path}/attachment/v2")),
+            )
+            .bearer_auth(access_token)
+            .json(&req)
+            .send()
+            .await
+            .map_err(|source| Error::Reqwest { source })?;
+        match res.status() {
+            reqwest::StatusCode::OK | reqwest::StatusCode::CREATED => {
+                let data: AttachmentUploadData = res.json_with_path().await?;
+                validate_path_id(&data.attachment_id)?;
+                Ok(Some(data))
+            }
+            reqwest::StatusCode::NOT_FOUND => Ok(None),
+            reqwest::StatusCode::UNAUTHORIZED => {
+                Err(Error::RequestUnauthorized)
+            }
+            status => {
+                let code = status.as_u16();
+                if let Ok(body) = res.text().await {
+                    log::warn!(
+                        "attachment v2 metadata failed ({code}): {body}"
+                    );
+                }
+                Err(Error::RequestFailed { status: code })
+            }
+        }
+    }
+
+    /// Upload encrypted bytes to a Direct (self-hosted / Vaultwarden) endpoint.
+    pub async fn upload_attachment_direct(
+        &self,
+        access_token: &str,
+        entry_id: &str,
+        attachment_id: &str,
+        upload_url: &str,
+        encrypted_file_name: &str,
+        encrypted_data: &[u8],
+    ) -> Result<()> {
+        validate_path_id(entry_id)?;
+        validate_path_id(attachment_id)?;
+        let target_url = self.resolve_direct_upload_url(
+            entry_id,
+            attachment_id,
+            upload_url,
+        )?;
+        let (boundary, body) = build_multipart_form(
+            &[],
+            "data",
+            encrypted_file_name,
+            encrypted_data,
+        );
+        let client = self
+            .reqwest_client_with_redirect(reqwest::redirect::Policy::none())
+            .await?;
+        let res = client
+            .post(target_url)
+            .bearer_auth(access_token)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(body)
+            .send()
+            .await
+            .map_err(|source| Error::Reqwest {
+                source: source.without_url(),
+            })?;
+        if res.status().is_success() {
+            Ok(())
+        } else if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+            Err(Error::RequestUnauthorized)
+        } else {
+            let code = res.status().as_u16();
+            if let Ok(body) = res.text().await {
+                log::warn!(
+                    "direct attachment upload failed ({code}): {body}"
+                );
+            }
+            Err(Error::RequestFailed { status: code })
+        }
+    }
+
+    /// Upload encrypted bytes directly to an Azure Blob SAS URL without any
+    /// vault bearer token or client certificate.
+    pub async fn upload_attachment_azure(
+        &self,
+        upload_url: &str,
+        encrypted_data: &[u8],
+    ) -> Result<()> {
+        const MAX_SINGLE_BLOB_UPLOAD_SIZE: usize = 256 * 1024 * 1024;
+
+        let url = reqwest::Url::parse(upload_url).map_err(|_| {
+            Error::InvalidAttachment {
+                reason: "invalid upload URL".to_string(),
+            }
+        })?;
+        let base = reqwest::Url::parse(&self.base_url).map_err(|_| {
+            Error::InvalidAttachment {
+                reason: "invalid server URL".to_string(),
+            }
+        })?;
+        validate_blob_url(&url, &base, "unsupported upload URL")?;
+
+        let ms_version = url
+            .query_pairs()
+            .find_map(|(k, v)| (k == "sv").then(|| v.into_owned()));
+        let ms_date = format_http_date(std::time::SystemTime::now());
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|source| Error::CreateReqwestClient { source })?;
+
+        if encrypted_data.len() <= MAX_SINGLE_BLOB_UPLOAD_SIZE {
+            let mut req = client
+                .put(url)
+                .header("x-ms-date", &ms_date)
+                .header("x-ms-blob-type", "BlockBlob")
+                .header(
+                    reqwest::header::CONTENT_LENGTH,
+                    encrypted_data.len().to_string(),
+                )
+                .body(encrypted_data.to_vec());
+            if let Some(version) = &ms_version {
+                req = req.header("x-ms-version", version);
+            }
+            let res = req.send().await.map_err(|source| Error::Reqwest {
+                source: source.without_url(),
+            })?;
+            if res.status() == reqwest::StatusCode::CREATED
+                || res.status() == reqwest::StatusCode::OK
+            {
+                return Ok(());
+            }
+            return Err(Error::RequestFailed {
+                status: res.status().as_u16(),
+            });
+        }
+
+        // Single-block Put Block + Put Block List for blobs > 256 MiB
+        let block_id = crate::base64::encode(format!("{:048}", 0));
+        let mut block_url = url.clone();
+        block_url
+            .query_pairs_mut()
+            .append_pair("comp", "block")
+            .append_pair("blockid", &block_id);
+        let mut block_req = client
+            .put(block_url)
+            .header("x-ms-date", &ms_date)
+            .header(
+                reqwest::header::CONTENT_LENGTH,
+                encrypted_data.len().to_string(),
+            )
+            .body(encrypted_data.to_vec());
+        if let Some(version) = &ms_version {
+            block_req = block_req.header("x-ms-version", version);
+        }
+        let block_res =
+            block_req.send().await.map_err(|source| Error::Reqwest {
+                source: source.without_url(),
+            })?;
+        if block_res.status() != reqwest::StatusCode::CREATED
+            && block_res.status() != reqwest::StatusCode::OK
+        {
+            return Err(Error::RequestFailed {
+                status: block_res.status().as_u16(),
+            });
+        }
+
+        let block_list_xml = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList><Latest>{block_id}</Latest></BlockList>"
+        );
+        let mut block_list_url = url;
+        block_list_url
+            .query_pairs_mut()
+            .append_pair("comp", "blocklist");
+        let mut list_req = client
+            .put(block_list_url)
+            .header("x-ms-date", &ms_date)
+            .header(reqwest::header::CONTENT_TYPE, "application/xml")
+            .header(
+                reqwest::header::CONTENT_LENGTH,
+                block_list_xml.len().to_string(),
+            )
+            .body(block_list_xml);
+        if let Some(version) = &ms_version {
+            list_req = list_req.header("x-ms-version", version);
+        }
+        let list_res =
+            list_req.send().await.map_err(|source| Error::Reqwest {
+                source: source.without_url(),
+            })?;
+        if list_res.status() == reqwest::StatusCode::CREATED
+            || list_res.status() == reqwest::StatusCode::OK
+        {
+            Ok(())
+        } else {
+            Err(Error::RequestFailed {
+                status: list_res.status().as_u16(),
+            })
+        }
+    }
+
+    /// Legacy single-request attachment upload (`POST /ciphers/{id}/attachment`)
+    /// used only if `/attachment/v2` returns 404.
+    pub async fn upload_attachment_legacy(
+        &self,
+        access_token: &str,
+        entry_id: &str,
+        encrypted_file_name: &str,
+        encrypted_key: &str,
+        encrypted_data: &[u8],
+    ) -> Result<String> {
+        validate_path_id(entry_id)?;
+        let entry_path = encode_path_segment(entry_id);
+        let (boundary, body) = build_multipart_form(
+            &[("key", encrypted_key)],
+            "data",
+            encrypted_file_name,
+            encrypted_data,
+        );
+        let client = self
+            .reqwest_client_with_redirect(reqwest::redirect::Policy::none())
+            .await?;
+        let res = client
+            .post(self.api_url(&format!("/ciphers/{entry_path}/attachment")))
+            .bearer_auth(access_token)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(body)
+            .send()
+            .await
+            .map_err(|source| Error::Reqwest {
+                source: source.without_url(),
+            })?;
+        if res.status().is_success() {
+            let bytes =
+                res.bytes().await.map_err(|source| Error::Reqwest {
+                    source: source.without_url(),
+                })?;
+            if let Ok(cipher) =
+                serde_json::from_slice::<SyncResCipher>(&bytes)
+                && let Some(attachments) = cipher.attachments
+                && let Some(att) = attachments
+                    .iter()
+                    .rev()
+                    .find(|a| a.file_name == encrypted_file_name)
+                    .or_else(|| attachments.last())
+            {
+                return Ok(att.id.clone());
+            }
+            Ok(String::new())
+        } else if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+            Err(Error::RequestUnauthorized)
+        } else {
+            Err(Error::RequestFailed {
+                status: res.status().as_u16(),
+            })
+        }
+    }
+
+    /// Delete an attachment (`DELETE /ciphers/{id}/attachment/{attachment_id}`).
+    pub async fn delete_attachment(
+        &self,
+        access_token: &str,
+        entry_id: &str,
+        attachment_id: &str,
+    ) -> Result<()> {
+        validate_path_id(entry_id)?;
+        validate_path_id(attachment_id)?;
+        let entry_path = encode_path_segment(entry_id);
+        let attachment_path = encode_path_segment(attachment_id);
+        let client = self.reqwest_client().await?;
+        let res = client
+            .delete(self.api_url(&format!(
+                "/ciphers/{entry_path}/attachment/{attachment_path}"
+            )))
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|source| Error::Reqwest { source })?;
+        if res.status().is_success() {
+            Ok(())
+        } else if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+            Err(Error::RequestUnauthorized)
+        } else {
+            Err(Error::RequestFailed {
+                status: res.status().as_u16(),
+            })
+        }
+    }
+
+    fn resolve_direct_upload_url(
+        &self,
+        entry_id: &str,
+        attachment_id: &str,
+        upload_url: &str,
+    ) -> Result<reqwest::Url> {
+        let base = reqwest::Url::parse(&self.base_url).map_err(|_| {
+            Error::InvalidAttachment {
+                reason: "invalid server URL".to_string(),
+            }
+        })?;
+        let resolved = if upload_url.is_empty() {
+            let entry_path = encode_path_segment(entry_id);
+            let attachment_path = encode_path_segment(attachment_id);
+            self.api_url(&format!(
+                "/ciphers/{entry_path}/attachment/{attachment_path}"
+            ))
+        } else if upload_url.starts_with('/') {
+            let base_path = base.path().trim_end_matches('/');
+            if !base_path.is_empty()
+                && (upload_url == base_path
+                    || upload_url.starts_with(&format!("{base_path}/")))
+            {
+                base.join(upload_url)
+                    .map_err(|_| Error::InvalidAttachment {
+                        reason: "invalid direct upload URL".to_string(),
+                    })?
+                    .to_string()
+            } else {
+                self.api_url(upload_url)
+            }
+        } else {
+            upload_url.to_string()
+        };
+        let url = reqwest::Url::parse(&resolved).map_err(|_| {
+            Error::InvalidAttachment {
+                reason: "invalid direct upload URL".to_string(),
+            }
+        })?;
+        validate_blob_url(&url, &base, "unsupported direct upload URL")?;
+        if url.origin() != base.origin() {
+            return Err(Error::InvalidAttachment {
+                reason: "direct upload URL origin does not match API server"
+                    .to_string(),
+            });
+        }
+        Ok(url)
+    }
+
     pub fn add(
         &self,
         access_token: &str,
@@ -1385,103 +1982,7 @@ impl Client {
         notes: Option<&str>,
         folder_id: Option<&str>,
     ) -> Result<()> {
-        let mut req = CiphersPostReq {
-            ty: 1,
-            folder_id: folder_id.map(std::string::ToString::to_string),
-            name: name.to_string(),
-            notes: notes.map(std::string::ToString::to_string),
-            login: None,
-            card: None,
-            identity: None,
-            secure_note: None,
-        };
-        match data {
-            crate::db::EntryData::Login {
-                username,
-                password,
-                totp,
-                uris,
-            } => {
-                let uris = if uris.is_empty() {
-                    None
-                } else {
-                    Some(
-                        uris.iter()
-                            .map(|s| CipherLoginUri {
-                                uri: Some(s.uri.clone()),
-                                match_type: s.match_type,
-                            })
-                            .collect(),
-                    )
-                };
-                req.login = Some(CipherLogin {
-                    username: username.clone(),
-                    password: password.clone(),
-                    totp: totp.clone(),
-                    uris,
-                });
-            }
-            crate::db::EntryData::Card {
-                cardholder_name,
-                number,
-                brand,
-                exp_month,
-                exp_year,
-                code,
-            } => {
-                req.card = Some(CipherCard {
-                    cardholder_name: cardholder_name.clone(),
-                    number: number.clone(),
-                    brand: brand.clone(),
-                    exp_month: exp_month.clone(),
-                    exp_year: exp_year.clone(),
-                    code: code.clone(),
-                });
-            }
-            crate::db::EntryData::Identity {
-                title,
-                first_name,
-                middle_name,
-                last_name,
-                address1,
-                address2,
-                address3,
-                city,
-                state,
-                postal_code,
-                country,
-                phone,
-                email,
-                ssn,
-                license_number,
-                passport_number,
-                username,
-            } => {
-                req.identity = Some(CipherIdentity {
-                    title: title.clone(),
-                    first_name: first_name.clone(),
-                    middle_name: middle_name.clone(),
-                    last_name: last_name.clone(),
-                    address1: address1.clone(),
-                    address2: address2.clone(),
-                    address3: address3.clone(),
-                    city: city.clone(),
-                    state: state.clone(),
-                    postal_code: postal_code.clone(),
-                    country: country.clone(),
-                    phone: phone.clone(),
-                    email: email.clone(),
-                    ssn: ssn.clone(),
-                    license_number: license_number.clone(),
-                    passport_number: passport_number.clone(),
-                    username: username.clone(),
-                });
-            }
-            crate::db::EntryData::SecureNote => {
-                req.secure_note = Some(CipherSecureNote {});
-            }
-            crate::db::EntryData::SshKey { .. } => unreachable!(),
-        }
+        let req = build_ciphers_post_req(name, data, notes, folder_id);
         let client = reqwest::blocking::Client::new();
         let res = client
             .post(self.api_url("/ciphers"))
@@ -1551,6 +2052,7 @@ impl Client {
                 password,
                 totp,
                 uris,
+                password_revision_date,
             } => {
                 let uris = if uris.is_empty() {
                     None
@@ -1569,6 +2071,7 @@ impl Client {
                     password: password.clone(),
                     totp: totp.clone(),
                     uris,
+                    password_revision_date: password_revision_date.clone(),
                 });
             }
             crate::db::EntryData::Card {
@@ -1628,7 +2131,7 @@ impl Client {
                 });
             }
             crate::db::EntryData::SecureNote => {
-                req.secure_note = Some(CipherSecureNote {});
+                req.secure_note = Some(CipherSecureNote::default());
             }
             crate::db::EntryData::SshKey { .. } => unreachable!(),
         }
@@ -1954,6 +2457,238 @@ fn classify_login_error(error_res: &ConnectErrorRes, code: u16) -> Error {
     Error::RequestFailed { status: code }
 }
 
+const PATH_SEGMENT_ENCODE_SET: &percent_encoding::AsciiSet =
+    &percent_encoding::NON_ALPHANUMERIC.remove(b'-').remove(b'_');
+
+fn encode_path_segment(id: &str) -> percent_encoding::PercentEncode<'_> {
+    percent_encoding::utf8_percent_encode(id, PATH_SEGMENT_ENCODE_SET)
+}
+
+fn validate_path_id(id: &str) -> Result<()> {
+    if id.is_empty() || id == "." || id == ".." {
+        return Err(Error::InvalidAttachment {
+            reason: "invalid attachment identifiers".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_blob_url(
+    url: &reqwest::Url,
+    base: &reqwest::Url,
+    reason: &str,
+) -> Result<()> {
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || (base.scheme() == "https" && url.scheme() != "https")
+    {
+        return Err(Error::InvalidAttachment {
+            reason: reason.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn build_ciphers_post_req(
+    name: &str,
+    data: &crate::db::EntryData,
+    notes: Option<&str>,
+    folder_id: Option<&str>,
+) -> CiphersPostReq {
+    let mut req = CiphersPostReq {
+        ty: match data {
+            crate::db::EntryData::Login { .. } => 1,
+            crate::db::EntryData::SecureNote => 2,
+            crate::db::EntryData::Card { .. } => 3,
+            crate::db::EntryData::Identity { .. } => 4,
+            crate::db::EntryData::SshKey { .. } => 5,
+        },
+        folder_id: folder_id.map(std::string::ToString::to_string),
+        name: name.to_string(),
+        notes: notes.map(std::string::ToString::to_string),
+        login: None,
+        card: None,
+        identity: None,
+        secure_note: None,
+    };
+    match data {
+        crate::db::EntryData::Login {
+            username,
+            password,
+            totp,
+            uris,
+            password_revision_date,
+        } => {
+            let uris = if uris.is_empty() {
+                None
+            } else {
+                Some(
+                    uris.iter()
+                        .map(|s| CipherLoginUri {
+                            uri: Some(s.uri.clone()),
+                            match_type: s.match_type,
+                        })
+                        .collect(),
+                )
+            };
+            req.login = Some(CipherLogin {
+                username: username.clone(),
+                password: password.clone(),
+                totp: totp.clone(),
+                uris,
+                password_revision_date: password_revision_date.clone(),
+            });
+        }
+        crate::db::EntryData::Card {
+            cardholder_name,
+            number,
+            brand,
+            exp_month,
+            exp_year,
+            code,
+        } => {
+            req.card = Some(CipherCard {
+                cardholder_name: cardholder_name.clone(),
+                number: number.clone(),
+                brand: brand.clone(),
+                exp_month: exp_month.clone(),
+                exp_year: exp_year.clone(),
+                code: code.clone(),
+            });
+        }
+        crate::db::EntryData::Identity {
+            title,
+            first_name,
+            middle_name,
+            last_name,
+            address1,
+            address2,
+            address3,
+            city,
+            state,
+            postal_code,
+            country,
+            phone,
+            email,
+            ssn,
+            license_number,
+            passport_number,
+            username,
+        } => {
+            req.identity = Some(CipherIdentity {
+                title: title.clone(),
+                first_name: first_name.clone(),
+                middle_name: middle_name.clone(),
+                last_name: last_name.clone(),
+                address1: address1.clone(),
+                address2: address2.clone(),
+                address3: address3.clone(),
+                city: city.clone(),
+                state: state.clone(),
+                postal_code: postal_code.clone(),
+                country: country.clone(),
+                phone: phone.clone(),
+                email: email.clone(),
+                ssn: ssn.clone(),
+                license_number: license_number.clone(),
+                passport_number: passport_number.clone(),
+                username: username.clone(),
+            });
+        }
+        crate::db::EntryData::SecureNote => {
+            req.secure_note = Some(CipherSecureNote::default());
+        }
+        crate::db::EntryData::SshKey { .. } => unreachable!(),
+    }
+    req
+}
+
+fn build_multipart_form(
+    text_fields: &[(&str, &str)],
+    file_field: &str,
+    file_name: &str,
+    file_data: &[u8],
+) -> (String, Vec<u8>) {
+    let boundary = format!(
+        "----rbwBoundary{}",
+        rand::distr::Alphanumeric.sample_string(&mut rand::rng(), 24)
+    );
+    let sanitized_name: String = file_name
+        .chars()
+        .filter(|c| !matches!(c, '\r' | '\n'))
+        .flat_map(|c| match c {
+            '"' => vec!['\\', '"'],
+            '\\' => vec!['\\', '\\'],
+            other => vec![other],
+        })
+        .collect();
+
+    let mut body = Vec::with_capacity(file_data.len() + 256);
+    for (name, value) in text_fields {
+        body.extend_from_slice(b"--");
+        body.extend_from_slice(boundary.as_bytes());
+        body.extend_from_slice(
+            b"\r\nContent-Disposition: form-data; name=\"",
+        );
+        body.extend_from_slice(name.as_bytes());
+        body.extend_from_slice(b"\"\r\n\r\n");
+        body.extend_from_slice(value.as_bytes());
+        body.extend_from_slice(b"\r\n");
+    }
+    body.extend_from_slice(b"--");
+    body.extend_from_slice(boundary.as_bytes());
+    body.extend_from_slice(b"\r\nContent-Disposition: form-data; name=\"");
+    body.extend_from_slice(file_field.as_bytes());
+    body.extend_from_slice(b"\"; filename=\"");
+    body.extend_from_slice(sanitized_name.as_bytes());
+    body.extend_from_slice(
+        b"\"\r\nContent-Type: application/octet-stream\r\n\r\n",
+    );
+    body.extend_from_slice(file_data);
+    body.extend_from_slice(b"\r\n--");
+    body.extend_from_slice(boundary.as_bytes());
+    body.extend_from_slice(b"--\r\n");
+    (boundary, body)
+}
+
+fn format_http_date(time: std::time::SystemTime) -> String {
+    const WEEKDAYS: [&str; 7] =
+        ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
+        "Nov", "Dec",
+    ];
+    let secs = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let hour = rem / 3600;
+    let minute = (rem % 3600) / 60;
+    let second = rem % 60;
+
+    let dow = usize::try_from((days + 4) % 7).unwrap_or(0);
+    // Howard Hinnant's civil-from-days algorithm
+    let z = i64::try_from(days).unwrap_or(0) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + i64::from(month <= 2);
+    let month_idx = usize::try_from(month - 1).unwrap_or(0);
+
+    format!(
+        "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
+        WEEKDAYS[dow], day, MONTHS[month_idx], year, hour, minute, second
+    )
+}
+
 pub fn parse_webauthn_2fa_options<S: std::hash::BuildHasher>(
     providers_data: &std::collections::HashMap<String, serde_json::Value, S>,
 ) -> Option<WebAuthnAssertionOptions> {
@@ -2069,5 +2804,591 @@ mod tests {
         assert_eq!(prf.encrypted_private_key, "2.p_iv|p_ct|p_mac");
         assert_eq!(prf.encrypted_user_key, "4.u_ct");
         assert_eq!(prf.credential_id.as_deref(), Some("Y3JlZC0x"));
+    }
+
+    #[test]
+    fn test_secure_note_post_req_serialization() {
+        let req = build_ciphers_post_req(
+            "2.name|ct|mac",
+            &crate::db::EntryData::SecureNote,
+            Some("2.note|ct|mac"),
+            Some("folder-1"),
+        );
+        let val = serde_json::to_value(&req).unwrap();
+        assert_eq!(val["type"], 2);
+        assert_eq!(val["name"], "2.name|ct|mac");
+        assert_eq!(val["notes"], "2.note|ct|mac");
+        assert_eq!(val["folderId"], "folder-1");
+        assert_eq!(val["secureNote"]["type"], 0);
+        assert!(val["login"].is_null());
+
+        let legacy_note: CipherSecureNote =
+            serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy_note.ty, 0);
+    }
+
+    #[test]
+    fn test_format_http_date() {
+        assert_eq!(
+            format_http_date(std::time::UNIX_EPOCH),
+            "Thu, 01 Jan 1970 00:00:00 GMT"
+        );
+        assert_eq!(
+            format_http_date(
+                std::time::UNIX_EPOCH
+                    + std::time::Duration::from_secs(1_700_000_000)
+            ),
+            "Tue, 14 Nov 2023 22:13:20 GMT"
+        );
+        assert_eq!(
+            format_http_date(
+                std::time::UNIX_EPOCH
+                    + std::time::Duration::from_hours(474_768)
+            ),
+            "Thu, 29 Feb 2024 00:00:00 GMT"
+        );
+    }
+
+    #[test]
+    fn test_build_multipart_form_contains_fields_and_binary() {
+        let (boundary, body) = build_multipart_form(
+            &[("key", "2.kiv|kct|kmac")],
+            "data",
+            "2.niv|nct|nmac",
+            &[2, 0, 255, 10, 13],
+        );
+        let header = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"key\"\r\n\r\n2.kiv|kct|kmac\r\n\
+             --{boundary}\r\nContent-Disposition: form-data; name=\"data\"; filename=\"2.niv|nct|nmac\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n"
+        );
+        assert!(body.starts_with(header.as_bytes()));
+        let mut expected = header.into_bytes();
+        expected.extend_from_slice(&[2, 0, 255, 10, 13]);
+        expected
+            .extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        assert_eq!(body, expected);
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+
+    type RequestLog = std::sync::Arc<
+        std::sync::Mutex<Vec<(String, String, Option<String>)>>,
+    >;
+
+    async fn server(
+        mode: &'static str,
+    ) -> (String, RequestLog, tokio::task::JoinHandle<()>) {
+        let listener =
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let url = base.clone();
+        let app = axum::Router::new().fallback(
+            move |method: axum::http::Method,
+                  uri: axum::http::Uri,
+                  headers: axum::http::HeaderMap,
+                  body: axum::body::Bytes| {
+                let seen = seen.clone();
+                let url = url.clone();
+                async move {
+                    seen.lock().unwrap().push((
+                        method.to_string(),
+                        uri.to_string(),
+                        headers
+                            .get("Authorization")
+                            .map(|v| v.to_str().unwrap().to_string()),
+                    ));
+                    let mut status = 200;
+                    let path = uri
+                        .path()
+                        .strip_prefix("/api")
+                        .unwrap_or_else(|| uri.path());
+                    let resp_body = match (method.as_str(), path) {
+                        ("GET", "/ciphers/entry") => {
+                            if mode == "unauthorized" {
+                                status = 401;
+                            }
+                            let id = if mode == "wrong-entry" {
+                                "other"
+                            } else {
+                                "entry"
+                            };
+                            let attachment = serde_json::json!({
+                                "id": "file",
+                                "fileName": "encrypted",
+                                "url": format!("{url}/old"),
+                                "key": null,
+                                "size": "2"
+                            });
+                            let attachments = if mode == "duplicate" {
+                                vec![attachment.clone(), attachment]
+                            } else {
+                                vec![attachment]
+                            };
+                            serde_json::to_vec(&serde_json::json!({
+                                "id": id,
+                                "name": "encrypted",
+                                "secureNote": {"type": 0},
+                                "reprompt": 1,
+                                "deletedDate": if mode == "deleted" { Some("2025-01-01") } else { None },
+                                "attachments": attachments
+                            }))
+                            .unwrap()
+                        }
+                        ("GET", "/ciphers/entry/attachment/file") => {
+                            if mode == "legacy" {
+                                status = 404;
+                            }
+                            if mode == "forbidden" {
+                                status = 403;
+                            }
+                            let id = if mode == "wrong-attachment" {
+                                "other"
+                            } else {
+                                "file"
+                            };
+                            serde_json::to_vec(&serde_json::json!({
+                                "id": id,
+                                "fileName": "encrypted",
+                                "url": format!("{url}/blob")
+                            }))
+                            .unwrap()
+                        }
+                        ("GET", "/blob" | "/old") => vec![0, 255],
+                        ("POST", "/ciphers/entry/attachment/v2") => {
+                            if mode == "upload-legacy" {
+                                status = 404;
+                                vec![]
+                            } else if mode == "upload-azure" {
+                                serde_json::to_vec(&serde_json::json!({
+                                    "attachmentId": "att-az-1",
+                                    "url": format!("{url}/azure-blob?sv=2019-12-12&sig=abc"),
+                                    "fileUploadType": 1
+                                }))
+                                .unwrap()
+                            } else {
+                                serde_json::to_vec(&serde_json::json!({
+                                    "attachmentId": "att-dir-1",
+                                    "url": "/ciphers/entry/attachment/att-dir-1",
+                                    "fileUploadType": 0
+                                }))
+                                .unwrap()
+                            }
+                        }
+                        ("POST", "/ciphers/entry/attachment/att-dir-1") => {
+                            let ct = headers
+                                .get(axum::http::header::CONTENT_TYPE)
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("");
+                            assert!(ct.starts_with("multipart/form-data; boundary="));
+                            assert!(
+                                body.windows(b"name=\"data\"".len())
+                                    .any(|w| w == b"name=\"data\"")
+                            );
+                            if mode == "upload-direct-fail" {
+                                status = 500;
+                            }
+                            vec![]
+                        }
+                        ("PUT", "/azure-blob") => {
+                            assert!(!headers.contains_key("Authorization"));
+                            assert_eq!(
+                                headers
+                                    .get("x-ms-blob-type")
+                                    .and_then(|v| v.to_str().ok()),
+                                Some("BlockBlob")
+                            );
+                            assert_eq!(
+                                headers
+                                    .get("x-ms-version")
+                                    .and_then(|v| v.to_str().ok()),
+                                Some("2019-12-12")
+                            );
+                            assert!(headers.contains_key("x-ms-date"));
+                            status = 201;
+                            vec![]
+                        }
+                        ("POST", "/ciphers/entry/attachment") => {
+                            assert!(
+                                body.windows(b"name=\"key\"".len())
+                                    .any(|w| w == b"name=\"key\"")
+                            );
+                            serde_json::to_vec(&serde_json::json!({
+                                "id": "entry",
+                                "name": "encrypted",
+                                "secureNote": {"type": 0},
+                                "reprompt": 0,
+                                "attachments": [{
+                                    "id": "att-legacy-1",
+                                    "fileName": "2.fname",
+                                    "url": "",
+                                    "key": "2.key",
+                                    "size": "4"
+                                }]
+                            }))
+                            .unwrap()
+                        }
+                        (
+                            "DELETE",
+                            "/ciphers/entry/attachment/att-dir-1"
+                            | "/ciphers/entry/attachment/file",
+                        ) => {
+                            vec![]
+                        }
+                        _ => {
+                            status = 404;
+                            vec![]
+                        }
+                    };
+                    axum::http::Response::builder()
+                        .status(status)
+                        .body(axum::body::Body::from(resp_body))
+                        .unwrap()
+                }
+            },
+        );
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (base, requests, task)
+    }
+
+    #[tokio::test]
+    async fn fresh_metadata_binds_entry_and_never_sends_bearer_to_blob() {
+        let (url, requests, task) = server("ok").await;
+        let client = Client::new(&url, &url, &url, None);
+        let (entry, attachment) = client
+            .attachment("synthetic-token", "entry", "file")
+            .await
+            .unwrap();
+        assert!(entry.master_password_reprompt());
+        assert_eq!(
+            client.attachment_bytes(&attachment).await.unwrap(),
+            [0, 255]
+        );
+        let seen = requests.lock().unwrap();
+        assert_eq!(
+            seen[0],
+            (
+                "GET".to_string(),
+                "/ciphers/entry".to_string(),
+                Some("Bearer synthetic-token".to_string())
+            )
+        );
+        assert_eq!(
+            seen[1],
+            (
+                "GET".to_string(),
+                "/ciphers/entry/attachment/file".to_string(),
+                Some("Bearer synthetic-token".to_string())
+            )
+        );
+        assert_eq!(seen[2], ("GET".to_string(), "/blob".to_string(), None));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn only_404_uses_url_from_fresh_cipher_metadata() {
+        let (url, _, task) = server("legacy").await;
+        let client = Client::new(&url, &url, &url, None);
+        let (_, attachment) =
+            client.attachment("token", "entry", "file").await.unwrap();
+        assert_eq!(attachment.url, format!("{url}/old"));
+        assert_eq!(
+            client.attachment_bytes(&attachment).await.unwrap(),
+            [0, 255]
+        );
+        task.abort();
+        let (url, requests, task) = server("forbidden").await;
+        let client = Client::new(&url, &url, &url, None);
+        assert!(matches!(
+            client.attachment("token", "entry", "file").await,
+            Err(Error::RequestFailed { status: 403 })
+        ));
+        assert_eq!(requests.lock().unwrap().len(), 2);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn mismatched_deleted_duplicate_and_unauthorized_metadata_fail_closed()
+     {
+        for mode in [
+            "wrong-entry",
+            "wrong-attachment",
+            "deleted",
+            "duplicate",
+            "unauthorized",
+        ] {
+            let (url, requests, task) = server(mode).await;
+            let client = Client::new(&url, &url, &url, None);
+            let result = client.attachment("token", "entry", "file").await;
+            if mode == "unauthorized" {
+                assert!(matches!(result, Err(Error::RequestUnauthorized)));
+            } else {
+                assert!(
+                    matches!(result, Err(Error::InvalidAttachment { .. })),
+                    "{mode}"
+                );
+            }
+            assert!(
+                !requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|(_, url, _)| url == "/blob" || url == "/old")
+            );
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn identifiers_cannot_change_the_resource_path() {
+        let (url, requests, task) = server("ok").await;
+        let client = Client::new(&url, &url, &url, None);
+        assert!(
+            client
+                .attachment("token", "other/../entry?ignored", "file")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            requests.lock().unwrap()[0].1,
+            "/ciphers/other%2F%2E%2E%2Fentry%3Fignored"
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn dot_identifiers_and_unsafe_urls_are_rejected_without_network() {
+        let client = Client::new("https://api.example.invalid", "", "", None);
+        for id in ["", ".", ".."] {
+            assert!(matches!(
+                client.attachment("token", id, "file").await,
+                Err(Error::InvalidAttachment { .. })
+            ));
+            assert!(matches!(
+                client.attachment("token", "entry", id).await,
+                Err(Error::InvalidAttachment { .. })
+            ));
+            assert!(matches!(
+                client.delete_attachment("token", id, "file").await,
+                Err(Error::InvalidAttachment { .. })
+            ));
+        }
+        for url in [
+            "file:///etc/passwd",
+            "http://api.example.invalid/file",
+            "https://user:pass@example.invalid/file",
+        ] {
+            let attachment = crate::attachment::Attachment {
+                id: "file".to_string(),
+                url: url.to_string(),
+                file_name: "encrypted".to_string(),
+                key: None,
+                size: None,
+            };
+            assert!(matches!(
+                client.attachment_bytes(&attachment).await,
+                Err(Error::InvalidAttachment { .. })
+            ));
+            assert!(matches!(
+                client.upload_attachment_azure(url, b"bytes").await,
+                Err(Error::InvalidAttachment { .. })
+            ));
+        }
+        // Direct upload must refuse cross-origin URLs so bearer token is never leaked
+        assert!(matches!(
+            client
+                .upload_attachment_direct(
+                    "token",
+                    "entry",
+                    "att",
+                    "https://evil.example.invalid/upload",
+                    "2.name",
+                    b"bytes",
+                )
+                .await,
+            Err(Error::InvalidAttachment { .. })
+        ));
+        let api_client =
+            Client::new("https://vault.example.invalid/api", "", "", None);
+        assert_eq!(
+            api_client
+                .resolve_direct_upload_url(
+                    "entry",
+                    "att",
+                    "/ciphers/entry/attachment/att",
+                )
+                .unwrap()
+                .as_str(),
+            "https://vault.example.invalid/api/ciphers/entry/attachment/att"
+        );
+        assert_eq!(
+            api_client
+                .resolve_direct_upload_url(
+                    "entry",
+                    "att",
+                    "/api/ciphers/entry/attachment/att",
+                )
+                .unwrap()
+                .as_str(),
+            "https://vault.example.invalid/api/ciphers/entry/attachment/att"
+        );
+    }
+
+    #[tokio::test]
+    async fn redirected_blob_requests_stay_unauthenticated() {
+        let (url, requests, task) = server("ok").await;
+        let listener =
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let target = format!("{url}/blob");
+        let app = axum::Router::new().fallback(
+            move |headers: axum::http::HeaderMap| {
+                let target = target.clone();
+                async move {
+                    assert!(!headers.contains_key("Authorization"));
+                    axum::http::Response::builder()
+                        .status(302)
+                        .header("Location", target)
+                        .body(axum::body::Body::empty())
+                        .unwrap()
+                }
+            },
+        );
+        let redirect_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = Client::new(&origin, &origin, &origin, None);
+        let attachment = crate::attachment::Attachment {
+            id: "file".to_string(),
+            url: origin,
+            file_name: "encrypted".to_string(),
+            key: None,
+            size: None,
+        };
+        assert_eq!(
+            client.attachment_bytes(&attachment).await.unwrap(),
+            [0, 255]
+        );
+        assert_eq!(
+            requests.lock().unwrap()[0],
+            ("GET".to_string(), "/blob".to_string(), None)
+        );
+        redirect_task.abort();
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn upload_direct_azure_legacy_cleanup_and_delete() {
+        let encrypted = crate::attachment::EncryptedAttachment {
+            file_name: "2.fname".to_string(),
+            key: "2.key".to_string(),
+            data: vec![2, 1, 2, 3],
+        };
+
+        // 1. Direct upload (Vaultwarden)
+        {
+            let (url, requests, task) = server("upload-direct").await;
+            let config = crate::config::Config {
+                base_url: Some(url.clone()),
+                ..crate::config::Config::default()
+            };
+            let (_, att_id) = crate::actions::upload_attachment(
+                &config, "tok", "ref", "entry", &encrypted,
+            )
+            .await
+            .unwrap();
+            assert_eq!(att_id, "att-dir-1");
+            let seen = requests.lock().unwrap();
+            assert_eq!(seen[0].1, "/api/ciphers/entry/attachment/v2");
+            assert_eq!(seen[1].1, "/api/ciphers/entry/attachment/att-dir-1");
+            assert_eq!(seen[1].2.as_deref(), Some("Bearer tok"));
+            task.abort();
+        }
+
+        // 2. Azure upload (Bitwarden Cloud)
+        {
+            let (url, requests, task) = server("upload-azure").await;
+            let config = crate::config::Config {
+                base_url: Some(url.clone()),
+                ..crate::config::Config::default()
+            };
+            let (_, att_id) = crate::actions::upload_attachment(
+                &config, "tok", "ref", "entry", &encrypted,
+            )
+            .await
+            .unwrap();
+            assert_eq!(att_id, "att-az-1");
+            let seen = requests.lock().unwrap();
+            assert_eq!(seen[0].1, "/api/ciphers/entry/attachment/v2");
+            assert_eq!(seen[1].0, "PUT");
+            assert_eq!(seen[1].2, None);
+            task.abort();
+        }
+
+        // 3. Direct upload failure triggers cleanup DELETE
+        {
+            let (url, requests, task) = server("upload-direct-fail").await;
+            let config = crate::config::Config {
+                base_url: Some(url.clone()),
+                ..crate::config::Config::default()
+            };
+            assert!(
+                crate::actions::upload_attachment(
+                    &config, "tok", "ref", "entry", &encrypted,
+                )
+                .await
+                .is_err()
+            );
+            let seen = requests.lock().unwrap();
+            assert_eq!(seen[2].0, "DELETE");
+            assert_eq!(seen[2].1, "/api/ciphers/entry/attachment/att-dir-1");
+            task.abort();
+        }
+
+        // 4. Legacy 404 fallback
+        {
+            let (url, requests, task) = server("upload-legacy").await;
+            let config = crate::config::Config {
+                base_url: Some(url.clone()),
+                ..crate::config::Config::default()
+            };
+            let (_, att_id) = crate::actions::upload_attachment(
+                &config, "tok", "ref", "entry", &encrypted,
+            )
+            .await
+            .unwrap();
+            assert_eq!(att_id, "att-legacy-1");
+            assert_eq!(
+                requests.lock().unwrap()[1].1,
+                "/api/ciphers/entry/attachment"
+            );
+            task.abort();
+        }
+
+        // 5. Explicit delete
+        {
+            let (url, requests, task) = server("ok").await;
+            let client = Client::new(&url, &url, &url, None);
+            client
+                .delete_attachment("tok", "entry", "file")
+                .await
+                .unwrap();
+            assert_eq!(
+                requests.lock().unwrap()[0],
+                (
+                    "DELETE".to_string(),
+                    "/ciphers/entry/attachment/file".to_string(),
+                    Some("Bearer tok".to_string())
+                )
+            );
+            task.abort();
+        }
     }
 }
