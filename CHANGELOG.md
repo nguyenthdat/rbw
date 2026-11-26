@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.16.1] - 2026-11-26
+
+### Fixed
+
+* Release workflow: capture `cargo-deb` output path and pass `GITHUB_TOKEN` to `cargo-binstall`.
+
 ## [1.16.0] - 2026-11-26
 
 ### Added

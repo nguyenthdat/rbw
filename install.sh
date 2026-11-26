@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | sh
-#   curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | sh -s -- --version 1.16.0
+#   curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | sh -s -- --version 1.16.1
 #
 # Environment variables:
 #   RBW_VERSION                   Release version/tag to install (default: latest)
@@ -40,7 +40,7 @@ USAGE:
     install.sh [OPTIONS]
 
 OPTIONS:
-    -v, --version <VERSION>      Install a specific version (e.g. 1.16.0 or v1.16.0)
+    -v, --version <VERSION>      Install a specific version (e.g. 1.16.1 or v1.16.1)
     -d, --install-dir <DIR>      Install binaries into DIR (default: ~/.local/bin)
         --no-modify-path         Do not modify shell profile files
     -q, --quiet                  Suppress informational output

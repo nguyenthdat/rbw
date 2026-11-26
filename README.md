@@ -74,10 +74,10 @@ Install a pinned version or customize the target directory:
 
 ```sh
 # Install a specific release tag
-curl -LsSf https://github.com/nguyenthdat/rbw/releases/download/v1.16.0/install.sh | sh
+curl -LsSf https://github.com/nguyenthdat/rbw/releases/download/v1.16.1/install.sh | sh
 
 # Or pass flags / environment variables
-curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | sh -s -- --version 1.16.0 --install-dir ~/.local/bin
+curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | sh -s -- --version 1.16.1 --install-dir ~/.local/bin
 curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | RBW_NO_MODIFY_PATH=1 sh
 ```
 
@@ -92,7 +92,7 @@ Upgrade an existing standalone installation directly from GitHub Releases (verif
 ```sh
 rbw self update                  # Update to the latest release (alias: rbw self-update)
 rbw self update --check          # Check whether a newer version is available
-rbw self update --version 1.16.0 # Install a specific version
+rbw self update --version 1.16.1 # Install a specific version
 rbw self update --force          # Reinstall even if already up to date
 ```
 

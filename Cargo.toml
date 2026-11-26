@@ -1,6 +1,6 @@
 [package]
 name = "rbw"
-version = "1.16.0"
+version = "1.16.1"
 authors = [
     "Jesse Luehrs <doy@tozt.net>",
     "Dat Nguyen <dat.nguyen@bitbytelab.io>",
