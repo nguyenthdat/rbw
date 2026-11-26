@@ -21,6 +21,43 @@ and merge pull requests implementing those features.
 
 ## Installation
 
+### Standalone Installer (macOS & Linux)
+
+Install prebuilt `rbw` and `rbw-agent` binaries (with SHA-256 verification) via
+`curl` or `wget`:
+
+```sh
+curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | sh
+```
+
+Install a specific version or customize the install path:
+
+```sh
+# Install a pinned release
+curl -LsSf https://github.com/nguyenthdat/rbw/releases/download/v1.15.0/install.sh | sh
+# Or via flags / environment variables
+curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | sh -s -- --version 1.15.0 --install-dir ~/.local/bin
+curl -LsSf https://github.com/nguyenthdat/rbw/releases/latest/download/install.sh | RBW_NO_MODIFY_PATH=1 sh
+```
+
+On macOS, Apple Silicon (`aarch64`) and Intel (`x86_64`) are supported (including
+automatic Rosetta 2 detection). On Linux (`x86_64` and `aarch64`), the installer
+selects `gnu` (with native FIDO2/YubiKey support) when `glibc >= 2.39`, and
+automatically falls back to static `musl` binaries on Alpine or older glibc
+systems (`RBW_INSTALL_LIBC=musl` or `gnu` overrides this).
+
+#### Self-Update
+
+Update an existing standalone installation directly from GitHub Releases (with
+SHA-256 verification and atomic replacement of both `rbw` and `rbw-agent`):
+
+```sh
+rbw self update                  # Update to the latest release (alias: rbw self-update)
+rbw self update --check          # Check whether a newer version is available
+rbw self update --version 1.16.0 # Install a specific version
+rbw self update --force          # Reinstall even if already up to date
+```
+
 ### Arch Linux
 
 `rbw` is available in the [extra

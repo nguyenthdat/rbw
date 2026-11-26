@@ -1,0 +1,299 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/publish (defaults to v<Cargo.toml version>)"
+        required: false
+        type: string
+      draft:
+        description: "Create the GitHub Release as a draft"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      draft: ${{ steps.meta.outputs.draft }}
+      has_notes: ${{ steps.notes.outputs.has_notes }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Resolve version and validate tag
+        id: meta
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_DRAFT: ${{ inputs.draft }}
+        run: |
+          set -euo pipefail
+          VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          EXPECTED_TAG="v${VERSION}"
+
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            DRAFT="false"
+          else
+            TAG="${INPUT_TAG:-${EXPECTED_TAG}}"
+            DRAFT="${INPUT_DRAFT:-false}"
+          fi
+
+          if [ "${TAG}" != "${EXPECTED_TAG}" ]; then
+            echo "::error::Tag '${TAG}' does not match Cargo.toml version '${EXPECTED_TAG}'" >&2
+            exit 1
+          fi
+
+          if [[ "${TAG}" == *-* ]]; then
+            PRERELEASE="true"
+          else
+            PRERELEASE="false"
+          fi
+
+          {
+            echo "version=${VERSION}"
+            echo "tag=${TAG}"
+            echo "prerelease=${PRERELEASE}"
+            echo "draft=${DRAFT}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Extract changelog notes
+        id: notes
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          awk -v ver="${VERSION}" '
+            $0 ~ "^## \\[" ver "\\]" { in_sec = 1; next }
+            in_sec && /^## / { exit }
+            in_sec { print }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ -s release-notes.md ] && grep -q '[^[:space:]]' release-notes.md; then
+            echo "has_notes=true" >> "${GITHUB_OUTPUT}"
+          else
+            rm -f release-notes.md
+            echo "has_notes=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Upload release notes artifact
+        if: steps.notes.outputs.has_notes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+
+  build:
+    needs: prepare
+    fail-fast: false
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+            musl: false
+            deb: false
+            linux_udev: false
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: true
+            musl: false
+            deb: false
+            linux_udev: false
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            cross: false
+            musl: false
+            deb: false
+            linux_udev: true
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            cross: false
+            musl: true
+            musl_arch: x86_64
+            deb: true
+            linux_udev: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            cross: false
+            musl: false
+            deb: false
+            linux_udev: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            cross: false
+            musl: true
+            musl_arch: aarch64
+            deb: false
+            linux_udev: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux libudev headers
+        if: matrix.linux_udev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Install Linux musl toolchain
+        if: matrix.musl
+        env:
+          MUSL_ARCH: ${{ matrix.musl_arch }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y musl-tools linux-libc-dev
+          sudo ln -sfn /usr/include/linux "/usr/include/${MUSL_ARCH}-linux-musl/linux"
+          sudo ln -sfn /usr/include/asm-generic "/usr/include/${MUSL_ARCH}-linux-musl/asm-generic"
+          sudo ln -sfn "/usr/include/${MUSL_ARCH}-linux-gnu/asm" "/usr/include/${MUSL_ARCH}-linux-musl/asm"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binaries
+        env:
+          TARGET: ${{ matrix.target }}
+          IS_MUSL: ${{ matrix.musl }}
+          MUSL_ARCH: ${{ matrix.musl_arch }}
+        run: |
+          set -euo pipefail
+          if [ "${IS_MUSL}" = "true" ]; then
+            export "CC_${MUSL_ARCH}_unknown_linux_musl=musl-gcc"
+          fi
+          cargo build --release --locked --all-features --target "${TARGET}"
+
+      - name: Generate shell completions and package tarball
+        env:
+          TARGET: ${{ matrix.target }}
+          IS_CROSS: ${{ matrix.cross }}
+        run: |
+          set -euo pipefail
+          BIN_DIR="target/${TARGET}/release"
+          COMP_DIR="${BIN_DIR}/completion"
+          mkdir -p "${COMP_DIR}"
+
+          if [ "${IS_CROSS}" = "true" ] && ! "${BIN_DIR}/rbw" --version >/dev/null 2>&1; then
+            cargo build --release --locked --all-features --bin rbw
+            COMP_BIN="target/release/rbw"
+          else
+            COMP_BIN="${BIN_DIR}/rbw"
+          fi
+
+          "${COMP_BIN}" gen-completions bash > "${COMP_DIR}/bash"
+          "${COMP_BIN}" gen-completions zsh > "${COMP_DIR}/zsh"
+          "${COMP_BIN}" gen-completions fish > "${COMP_DIR}/fish"
+
+          STAGE_DIR="dist/rbw-${TARGET}"
+          mkdir -p "${STAGE_DIR}/completion"
+          cp "${BIN_DIR}/rbw" "${BIN_DIR}/rbw-agent" "${STAGE_DIR}/"
+          cp README.md LICENSE "${STAGE_DIR}/"
+          cp "${COMP_DIR}/bash" "${COMP_DIR}/zsh" "${COMP_DIR}/fish" "${STAGE_DIR}/completion/"
+          chmod 755 "${STAGE_DIR}/rbw" "${STAGE_DIR}/rbw-agent"
+
+          tar -C dist -czf "dist/rbw-${TARGET}.tar.gz" "rbw-${TARGET}"
+          rm -rf "${STAGE_DIR}"
+
+      - name: Install cargo-deb
+        if: matrix.deb
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Build Debian package
+        if: matrix.deb
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo binstall --no-confirm cargo-deb
+          cargo deb --no-build --target "${TARGET}"
+          cp "target/${TARGET}/debian/rbw_${VERSION}_amd64.deb" dist/
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            dist/rbw-${{ matrix.target }}.tar.gz
+            dist/*.deb
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Download release notes artifact
+        if: needs.prepare.outputs.has_notes == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: .
+
+      - name: Stamp install.sh and generate SHA-256 checksums
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          sed "s|^RBW_RELEASE_VERSION=\"\"$|RBW_RELEASE_VERSION=\"${TAG}\"|" install.sh > dist/install.sh
+          grep -Fqx "RBW_RELEASE_VERSION=\"${TAG}\"" dist/install.sh
+          chmod 755 dist/install.sh
+
+          cd dist
+          rm -f SHA256SUMS ./*.sha256
+          for file in *.tar.gz *.deb install.sh; do
+            [ -f "${file}" ] || continue
+            sha256sum "${file}" > "${file}.sha256"
+          done
+          LC_ALL=C sha256sum *.tar.gz *.deb install.sh > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          DRAFT: ${{ needs.prepare.outputs.draft }}
+          HAS_NOTES: ${{ needs.prepare.outputs.has_notes }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/* --clobber
+          else
+            ARGS=(release create "${TAG}" dist/* --target "${GITHUB_SHA}" --title "rbw ${TAG}")
+            if [ "${HAS_NOTES}" = "true" ]; then
+              ARGS+=(--notes-file release-notes.md)
+            else
+              ARGS+=(--generate-notes)
+            fi
+            if [ "${PRERELEASE}" = "true" ]; then
+              ARGS+=(--prerelease)
+            fi
+            if [ "${DRAFT}" = "true" ]; then
+              ARGS+=(--draft)
+            fi
+            gh "${ARGS[@]}"
+          fi

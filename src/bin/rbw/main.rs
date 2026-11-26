@@ -1,4 +1,4 @@
-#![allow(clippy::large_unopt_stack_frames)]
+#![allow(unknown_lints, clippy::large_unopt_stack_frames)]
 
 use std::io::Write as _;
 
@@ -10,6 +10,8 @@ mod commands;
 #[cfg(feature = "mcp")]
 mod mcp;
 mod prompt;
+#[cfg(feature = "self-update")]
+mod self_update;
 mod sock;
 
 #[derive(Debug, clap::Args)]
@@ -384,6 +386,20 @@ enum Opt {
         #[command(subcommand)]
         action: Option<McpAction>,
     },
+
+    #[cfg(feature = "self-update")]
+    #[command(name = "self", about = "Manage the rbw installation")]
+    Self_ {
+        #[command(subcommand)]
+        action: SelfAction,
+    },
+
+    #[cfg(feature = "self-update")]
+    #[command(
+        name = "self-update",
+        about = "Update rbw to the latest GitHub release (alias for `rbw self update`)"
+    )]
+    SelfUpdate(SelfUpdateArgs),
 }
 
 impl Opt {
@@ -425,6 +441,49 @@ impl Opt {
                 || "mcp".to_string(),
                 |action| format!("mcp {}", action.subcommand_name()),
             ),
+            #[cfg(feature = "self-update")]
+            Self::Self_ { action } => {
+                format!("self {}", action.subcommand_name())
+            }
+            #[cfg(feature = "self-update")]
+            Self::SelfUpdate(_) => "self-update".to_string(),
+        }
+    }
+}
+
+#[cfg(feature = "self-update")]
+#[derive(Debug, clap::Args)]
+struct SelfUpdateArgs {
+    #[arg(
+        long,
+        help = "Check if a newer release is available without installing"
+    )]
+    check: bool,
+    #[arg(
+        long,
+        value_name = "VERSION",
+        help = "Install a specific release version (e.g. 1.16.0 or v1.16.0)"
+    )]
+    version: Option<String>,
+    #[arg(
+        long,
+        help = "Reinstall even if already up to date or managed by a package manager"
+    )]
+    force: bool,
+}
+
+#[cfg(feature = "self-update")]
+#[derive(Debug, clap::Subcommand)]
+enum SelfAction {
+    #[command(about = "Update rbw and rbw-agent from GitHub Releases")]
+    Update(SelfUpdateArgs),
+}
+
+#[cfg(feature = "self-update")]
+impl SelfAction {
+    fn subcommand_name(&self) -> &'static str {
+        match self {
+            Self::Update(_) => "update",
         }
     }
 }
@@ -1146,6 +1205,17 @@ fn main() {
                 })
             }
         },
+        #[cfg(feature = "self-update")]
+        Opt::Self_ {
+            action: SelfAction::Update(args),
+        }
+        | Opt::SelfUpdate(args) => {
+            self_update::run(&self_update::UpdateOpts {
+                check: args.check,
+                version: args.version,
+                force: args.force,
+            })
+        }
     }
     .with_context(|| format!("rbw {subcommand_name}"));
 
@@ -1506,6 +1576,58 @@ mod tests {
                 ])
                 .is_err()
             );
+        }
+
+        #[cfg(feature = "self-update")]
+        {
+            let cli = Cli::try_parse_from(["rbw", "self", "update"]).unwrap();
+            assert!(matches!(
+                cli.command,
+                Opt::Self_ {
+                    action: SelfAction::Update(SelfUpdateArgs {
+                        check: false,
+                        version: None,
+                        force: false,
+                    })
+                }
+            ));
+
+            let cli = Cli::try_parse_from([
+                "rbw",
+                "self",
+                "update",
+                "--check",
+                "--version",
+                "v1.16.0",
+                "--force",
+            ])
+            .unwrap();
+            assert!(matches!(
+                cli.command,
+                Opt::Self_ {
+                    action: SelfAction::Update(SelfUpdateArgs {
+                        check: true,
+                        version: Some(ref v),
+                        force: true,
+                    })
+                } if v == "v1.16.0"
+            ));
+
+            let cli = Cli::try_parse_from([
+                "rbw",
+                "self-update",
+                "--version",
+                "1.16.0",
+            ])
+            .unwrap();
+            assert!(matches!(
+                cli.command,
+                Opt::SelfUpdate(SelfUpdateArgs {
+                    check: false,
+                    version: Some(ref v),
+                    force: false,
+                }) if v == "1.16.0"
+            ));
         }
     }
 }

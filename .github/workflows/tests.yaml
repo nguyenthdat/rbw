@@ -79,11 +79,12 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -Dwarnings
       - run: cargo fmt --check
       - run: cargo deny --all-features check
+      - run: shellcheck install.sh
   doc:
     runs-on: ubuntu-latest
     steps:
       - run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: RUSTDOCFLAGS="-Dwarnings" cargo doc --all-features
+      - run: RUSTDOCFLAGS="-Dwarnings" cargo doc --no-deps --all-features
       - run: cargo test --doc --all-features
